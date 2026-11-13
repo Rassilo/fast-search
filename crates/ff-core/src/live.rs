@@ -42,6 +42,10 @@ impl LiveIndex {
         &self.index
     }
 
+    pub fn into_index(self) -> Index {
+        self.index
+    }
+
     fn rebuild_dirs(&mut self) {
         self.dirs.clear();
         let mut path = Vec::new();

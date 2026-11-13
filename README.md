@@ -109,6 +109,10 @@ applications menu.
 | Properties | Alt+Enter |
 | Copy the file (paste it in a file manager) | Ctrl+C |
 | Copy the full path | Ctrl+Shift+C |
+| Drag results into another program | press and drag: moves them (hold Ctrl to copy) |
+| Select several results | Shift+arrows, Shift+click, Ctrl+click, Ctrl+Shift+A |
+| Move to trash / delete permanently (both ask first) | Del / Shift+Del |
+| Preferences | Options → Preferences... |
 | Actions menu (also: copy name) | right-click or the Menu key |
 | Menu bar | File, Edit, View, Options, Help |
 | Zoom | Ctrl++, Ctrl+-, Ctrl+0 |

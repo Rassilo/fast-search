@@ -28,6 +28,8 @@ pub const EV_MAPPING: u8 = 34;
 
 // Key syms the UI cares about.
 pub const K_BACKSPACE: u32 = 0xff08;
+pub const K_TAB: u32 = 0xff09;
+pub const K_BACK_TAB: u32 = 0xfe20;
 pub const K_RETURN: u32 = 0xff0d;
 pub const K_ESCAPE: u32 = 0xff1b;
 pub const K_HOME: u32 = 0xff50;
@@ -267,6 +269,37 @@ impl Conn {
         let seq = self.req(16, 0, &[H(name.len() as u16), H(0), S(name.as_bytes())]);
         let r = self.reply(seq)?.ok_or_else(|| err("InternAtom failed"))?;
         Ok(u32at(&r, 8))
+    }
+
+    /// The child windows of `window`, bottom-most first.
+    pub fn children(&mut self, window: u32) -> io::Result<Vec<u32>> {
+        let seq = self.req(15, 0, &[W(window)]); // QueryTree
+        let Some(r) = self.reply(seq)? else { return Ok(Vec::new()) };
+        let n = u16at(&r, 16) as usize;
+        Ok(r[32..].chunks_exact(4).take(n).map(|c| u32at(c, 0)).collect())
+    }
+
+    /// (is input-only, is viewable, bypasses the window manager) for `window`.
+    pub fn window_kind(&mut self, window: u32) -> io::Result<Option<(bool, bool, bool)>> {
+        let seq = self.req(3, 0, &[W(window)]); // GetWindowAttributes
+        Ok(self.reply(seq)?.filter(|r| r.len() >= 28).map(|r| (u16at(&r, 12) == 2, r[26] == 2, r[27] != 0)))
+    }
+
+    /// (x, y, width, height) of `window` relative to its parent.
+    pub fn geometry(&mut self, window: u32) -> io::Result<(i32, i32, i32, i32)> {
+        let seq = self.req(14, 0, &[W(window)]); // GetGeometry
+        let Some(r) = self.reply(seq)? else { return Ok((0, 0, 0, 0)) };
+        let at = |i| u16at(&r, i);
+        Ok((at(12) as i16 as i32, at(14) as i16 as i32, at(16) as i32, at(18) as i32))
+    }
+
+    /// The name of an atom (for diagnostics).
+    pub fn atom_name(&mut self, atom: u32) -> String {
+        let seq = self.req(17, 0, &[W(atom)]);
+        match self.reply(seq) {
+            Ok(Some(r)) => String::from_utf8_lossy(r.get(32..32 + u16at(&r, 8) as usize).unwrap_or(&[])).into_owned(),
+            _ => format!("atom {atom}"),
+        }
     }
 
     /// Replaces a property. `format` is 8 or 32 (bits per item).

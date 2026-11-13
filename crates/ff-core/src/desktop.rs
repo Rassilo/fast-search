@@ -37,6 +37,26 @@ pub fn open_in_editor(path: &Path) -> io::Result<()> {
     open(path)
 }
 
+/// Moves `path` to the desktop's trash (via `gio trash`), from where it
+/// can be restored.
+pub fn trash(path: &Path) -> io::Result<()> {
+    match succeeds(Command::new("gio").arg("trash").arg("--").arg(path)) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(io::Error::other(format!("could not move {} to the trash", path.display()))),
+        Err(e) => Err(io::Error::new(e.kind(), format!("cannot run gio: {e}"))),
+    }
+}
+
+/// Deletes `path` for good: a file or link, or a folder with everything
+/// in it. A link is removed itself, never what it points to.
+pub fn delete(path: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(path)?.file_type().is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
 /// `path` as a `file://` URI.
 pub fn file_uri(path: &Path) -> String {
     let mut uri = String::from("file://");
@@ -146,4 +166,41 @@ fn id_name(file: &str, id: u32) -> String {
             (f.nth(1)?.parse::<u32>().ok()? == id).then(|| name.to_string())
         })
         .unwrap_or_else(|| id.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delete_removes_files_folders_and_links_but_not_link_targets() {
+        let root = std::env::temp_dir().join(format!("ff_delete_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("keep/inner")).unwrap();
+        fs::write(root.join("keep/inner/data.txt"), "x").unwrap();
+        fs::create_dir_all(root.join("gone/deep")).unwrap();
+        fs::write(root.join("gone/deep/a.txt"), "x").unwrap();
+        fs::write(root.join("file.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(root.join("keep"), root.join("link-to-keep")).unwrap();
+
+        delete(&root.join("file.txt")).unwrap();
+        assert!(!root.join("file.txt").exists());
+
+        delete(&root.join("gone")).unwrap();
+        assert!(!root.join("gone").exists());
+
+        // Deleting a link to a folder removes the link only.
+        delete(&root.join("link-to-keep")).unwrap();
+        assert!(fs::symlink_metadata(root.join("link-to-keep")).is_err());
+        assert!(root.join("keep/inner/data.txt").exists());
+
+        assert!(delete(&root.join("never-existed")).is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn file_uris_escape_special_characters() {
+        assert_eq!(file_uri(Path::new("/home/me/a b#c.txt")), "file:///home/me/a%20b%23c.txt");
+        assert_eq!(file_uri(Path::new("/plain/path-1_2.3~")), "file:///plain/path-1_2.3~");
+    }
 }

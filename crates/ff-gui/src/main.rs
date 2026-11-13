@@ -1,10 +1,12 @@
 //! ff-gui: a search-as-you-type window over the ff index.
 
 mod canvas;
+mod dialog;
 mod settings;
 mod x11;
 
 use std::io;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::mpsc;
@@ -12,6 +14,7 @@ use std::time::{Duration, SystemTime};
 
 use canvas::{Canvas, Icon, Icons, Text};
 use ff_core::{BuildOptions, CaseMode, Index, Kind, Query, SearchOptions, Sort, desktop, group_digits};
+use dialog::{Dialog, Row};
 use settings::Config;
 use x11::P::*;
 use x11::*;
@@ -27,16 +30,22 @@ USAGE:
 KEYS:
   type               search as you type (same term syntax as `ff`)
   Up/Down/PgUp/PgDn, Ctrl+Home/End   move through the results
+  Shift + those, Shift+click, Ctrl+click, Ctrl+Shift+A   select several
+                     results; open, copy, drag and delete act on all of them
   Left/Right/Home/End   move in the search box (Shift selects, Ctrl by word)
   Ctrl+A / Ctrl+X    select all / cut the selected search text
   Enter              open the selected file         (double-click too)
   Ctrl+Enter         show it in the file manager    (double-click its path)
   Alt+Enter          properties
+  Del                move the selected result to the trash (asks first)
+  Shift+Del          delete it permanently (asks first)
   F4                 open in the default text editor
   Ctrl+C             copy the selected search text, else the file itself
                      (paste it in a file manager; as text it is the path)
   Ctrl+Shift+C       copy the full path
   Ctrl+V             paste into the search box
+  drag a result      drop it on a file manager to move it there
+                     (hold Ctrl to copy); also editors, upload boxes...
   Menu / right-click actions menu
   menu bar           File, Edit, View, Options and Help at the top
   Ctrl + / - / 0     zoom in / out / reset
@@ -49,6 +58,7 @@ KEYS:
 ENVIRONMENT:
   FF_GUI_SCALE       zoom factor, e.g. 1.5 (default: the desktop scale)
   FF_GUI_FONT        font file to use (default: the system sans-serif)
+  FF_GUI_DEBUG       file to append drag-and-drop diagnostics to
   FF_GUI_TITLEBAR    set to system to use the desktop title bar
                      instead of the built-in one (which shows the icon)
 ";
@@ -75,10 +85,18 @@ enum Action {
     CopyPath,
     CopyName,
     Properties,
+    /// Ask, then move to the trash / delete for good.
+    Trash,
+    DeleteForever,
+    /// The answers from those confirmation dialogs.
+    ConfirmTrash,
+    ConfirmDelete,
+    Preferences,
     Cut,
     Copy,
     Paste,
     SelectAll,
+    SelectAllResults,
     Show(Kind),
     Case(CaseMode),
     Reindex,
@@ -103,6 +121,7 @@ const CONTEXT_MENU: Items = &[
     ("Copy", "Ctrl+C", Action::CopyFile),
     ("Copy full path", "Ctrl+Shift+C", Action::CopyPath),
     ("Copy name", "", Action::CopyName),
+    ("Move to trash", "Del", Action::Trash),
     ("Properties", "Alt+Enter", Action::Properties),
 ];
 
@@ -114,6 +133,7 @@ const TEXT_CONTEXT_MENU: Items = &[
     ("Copy", "Ctrl+C", Action::CopyFile),
     ("Copy full path", "Ctrl+Shift+C", Action::CopyPath),
     ("Copy name", "", Action::CopyName),
+    ("Move to trash", "Del", Action::Trash),
     ("Properties", "Alt+Enter", Action::Properties),
 ];
 
@@ -127,6 +147,8 @@ const BAR: [(&str, Items); 5] = [
             ("Open folder", "Ctrl+Enter", Action::Reveal),
             ("Copy full path", "Ctrl+Shift+C", Action::CopyPath),
             ("Copy name", "", Action::CopyName),
+            ("Move to trash", "Del", Action::Trash),
+            ("Delete permanently", "Shift+Del", Action::DeleteForever),
             ("Properties", "Alt+Enter", Action::Properties),
             ("Rebuild index", "F5", Action::Reindex),
             ("Quit", "Ctrl+Q", Action::Quit),
@@ -138,7 +160,8 @@ const BAR: [(&str, Items); 5] = [
             ("Cut", "Ctrl+X", Action::Cut),
             ("Copy", "Ctrl+C", Action::Copy),
             ("Paste", "Ctrl+V", Action::Paste),
-            ("Select all", "Ctrl+A", Action::SelectAll),
+            ("Select all text", "Ctrl+A", Action::SelectAll),
+            ("Select all results", "Ctrl+Shift+A", Action::SelectAllResults),
         ],
     ),
     (
@@ -155,6 +178,7 @@ const BAR: [(&str, Items); 5] = [
     (
         "Options",
         &[
+            ("Preferences...", "", Action::Preferences),
             ("Zoom in", "Ctrl++", Action::ZoomIn),
             ("Zoom out", "Ctrl+-", Action::ZoomOut),
             ("Reset zoom", "Ctrl+0", Action::ZoomReset),
@@ -216,7 +240,15 @@ struct App {
     selecting: bool,
     last_box_click: u32,
     hits: Vec<u32>,
+    /// The current result row (where the keyboard is).
     sel: usize,
+    /// Extra selected rows; empty means just `sel` is selected.
+    marks: BTreeSet<usize>,
+    /// Where a Shift-selection started.
+    anchor_row: usize,
+    /// A selected row was pressed: if no drag follows, it becomes the
+    /// only selected one when the button is released.
+    collapse_on_release: Option<usize>,
     top: usize,
     kind: Kind,
     case: CaseMode,
@@ -264,6 +296,16 @@ struct App {
     /// The copied text is the path of a copied file.
     copied_file: bool,
     clip_atoms: ClipAtoms,
+    dnd: DndAtoms,
+    drag: Option<Drag>,
+    /// The open dialog window, if any; it is modal.
+    dialog: Option<Dialog>,
+    /// The files a confirmation dialog is asking about.
+    pending_paths: Vec<PathBuf>,
+    /// Paths (one per line) offered to the program a drag was dropped on.
+    dropped: String,
+    /// That drop was a move, so the files leave the results when it ends.
+    drop_moved: bool,
     /// Our copy is the current clipboard content.
     owns_clipboard: bool,
     last_click: (u32, usize),
@@ -344,12 +386,115 @@ fn main() -> ExitCode {
     }
 }
 
+fn debug_enabled() -> bool {
+    std::env::var_os("FF_GUI_DEBUG").is_some()
+}
+
+/// Appends a line to the file named by FF_GUI_DEBUG, if set.
+fn debug(msg: impl AsRef<str>) {
+    let Some(path) = std::env::var_os("FF_GUI_DEBUG") else { return };
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = io::Write::write_all(&mut file, format!("{}\n", msg.as_ref()).as_bytes());
+    }
+}
+
+/// The atoms of the XDND drag-and-drop protocol.
+#[derive(Clone, Copy)]
+struct DndAtoms {
+    aware: u32,
+    proxy: u32,
+    selection: u32,
+    type_list: u32,
+    enter: u32,
+    position: u32,
+    status: u32,
+    leave: u32,
+    drop: u32,
+    finished: u32,
+    action_copy: u32,
+    action_move: u32,
+}
+
+impl DndAtoms {
+    fn intern(c: &mut Conn) -> io::Result<DndAtoms> {
+        Ok(DndAtoms {
+            aware: c.intern_atom("XdndAware")?,
+            proxy: c.intern_atom("XdndProxy")?,
+            selection: c.intern_atom("XdndSelection")?,
+            type_list: c.intern_atom("XdndTypeList")?,
+            enter: c.intern_atom("XdndEnter")?,
+            position: c.intern_atom("XdndPosition")?,
+            status: c.intern_atom("XdndStatus")?,
+            leave: c.intern_atom("XdndLeave")?,
+            drop: c.intern_atom("XdndDrop")?,
+            finished: c.intern_atom("XdndFinished")?,
+            action_copy: c.intern_atom("XdndActionCopy")?,
+            action_move: c.intern_atom("XdndActionMove")?,
+        })
+    }
+}
+
+/// The window a drag is currently over.
+struct DropTarget {
+    window: u32,
+    /// Where messages for it go (itself, or its proxy).
+    dest: u32,
+    /// Protocol version we speak with it.
+    version: u32,
+    /// It said it would take the drop here.
+    accepted: bool,
+    /// What it would do with the files: move them (else copy).
+    moves: bool,
+    /// We sent a position and it has not answered yet.
+    waiting: bool,
+    /// The newest position, held back until it answers.
+    pending: Option<(i32, i32, u32)>,
+}
+
+/// A result being dragged out of the list.
+struct Drag {
+    /// The dragged paths, one per line.
+    path: String,
+    /// What to call them: a file name, or "5 items".
+    label: String,
+    /// Where the button went down, in window coordinates.
+    start: (i32, i32),
+    /// The pointer has moved far enough for this to be a drag.
+    active: bool,
+    /// Ctrl is held: ask for a copy instead of the default move.
+    copy: bool,
+    target: Option<DropTarget>,
+    /// Icon of the dragged result, for the image that follows the pointer.
+    icon: Icon,
+    /// That image's window (0 until the drag starts) and its pixels.
+    ghost: u32,
+    ghost_cv: Canvas,
+    /// Windows a Wayland compositor uses to receive drops on behalf of
+    /// native Wayland programs (found when the drag starts).
+    proxies: Vec<u32>,
+    motions: u32,
+}
+
+impl Drag {
+    fn new(path: String, start: (i32, i32), icon: Icon) -> Drag {
+        let (ghost, ghost_cv) = (0, Canvas::new());
+        let label = match path.lines().count() {
+            1 => path.rsplit('/').next().unwrap_or(&path).to_string(),
+            n => format!("{n} items"),
+        };
+        Drag { path, label, start, active: false, copy: false, target: None, icon, ghost, ghost_cv, proxies: Vec::new(), motions: 0 }
+    }
+}
+
 /// The atoms used to talk about the clipboard.
 #[derive(Clone, Copy)]
 struct ClipAtoms {
     clipboard: u32,
     targets: u32,
     utf8_string: u32,
+    /// Plain text under its MIME names, which Wayland programs ask for.
+    text_plain_utf8: u32,
+    text_plain: u32,
     /// "text/uri-list": the standard format for copied files.
     uri_list: u32,
     /// GNOME's own format for copied files.
@@ -362,6 +507,8 @@ impl ClipAtoms {
             clipboard: c.intern_atom("CLIPBOARD")?,
             targets: c.intern_atom("TARGETS")?,
             utf8_string: c.intern_atom("UTF8_STRING")?,
+            text_plain_utf8: c.intern_atom("text/plain;charset=utf-8")?,
+            text_plain: c.intern_atom("text/plain")?,
             uri_list: c.intern_atom("text/uri-list")?,
             gnome_files: c.intern_atom("x-special/gnome-copied-files")?,
         })
@@ -373,25 +520,26 @@ impl ClipAtoms {
 /// `file` says the text is the path of a copied file, which is then also
 /// offered in the formats file managers paste from.
 fn serve_selection(c: &mut Conn, ev: &[u8], text: &str, file: bool, atoms: &ClipAtoms) {
-    let ClipAtoms { targets, utf8_string, uri_list, gnome_files, .. } = *atoms;
-    let uri = ff_core::desktop::file_uri(std::path::Path::new(text));
+    let ClipAtoms { targets, utf8_string, text_plain_utf8, text_plain, uri_list, gnome_files, .. } = *atoms;
+    // For files, `text` holds one path per line.
+    let uris: Vec<String> = text.lines().map(|p| ff_core::desktop::file_uri(std::path::Path::new(p))).collect();
     let (requestor, selection, target) = (u32at(ev, 12), u32at(ev, 16), u32at(ev, 20));
     let mut property = match u32at(ev, 24) {
         0 => target, // obsolete clients
         p => p,
     };
     if target == targets {
-        let mut list = vec![targets, utf8_string, ATOM_STRING];
+        let mut list = vec![targets, utf8_string, text_plain_utf8, text_plain, ATOM_STRING];
         if file {
             list.extend([uri_list, gnome_files]);
         }
         let list: Vec<u8> = list.iter().flat_map(|a| a.to_le_bytes()).collect();
         c.set_property(requestor, property, ATOM_ATOM, 32, &list);
     } else if file && target == uri_list {
-        c.set_property(requestor, property, target, 8, format!("{uri}\r\n").as_bytes());
+        c.set_property(requestor, property, target, 8, (uris.join("\r\n") + "\r\n").as_bytes());
     } else if file && target == gnome_files {
-        c.set_property(requestor, property, target, 8, format!("copy\n{uri}").as_bytes());
-    } else if target == utf8_string || target == ATOM_STRING {
+        c.set_property(requestor, property, target, 8, format!("copy\n{}", uris.join("\n")).as_bytes());
+    } else if [utf8_string, text_plain_utf8, text_plain, ATOM_STRING].contains(&target) {
         c.set_property(requestor, property, target, 8, text.as_bytes());
     } else {
         property = 0; // refused
@@ -495,6 +643,7 @@ impl App {
         c.set_property(win, ATOM_WM_CLASS, ATOM_STRING, 8, b"ff-gui\0ff-gui\0");
 
         let clip_atoms = ClipAtoms::intern(&mut c)?;
+        let dnd = DndAtoms::intern(&mut c)?;
         let net_wm_moveresize = c.intern_atom("_NET_WM_MOVERESIZE")?;
         let net_wm_state = c.intern_atom("_NET_WM_STATE")?;
         let net_wm_maximized =
@@ -527,6 +676,9 @@ impl App {
             query,
             hits: Vec::new(),
             sel: 0,
+            marks: BTreeSet::new(),
+            anchor_row: 0,
+            collapse_on_release: None,
             top: 0,
             kind: Kind::Any,
             case: CaseMode::Smart,
@@ -559,6 +711,12 @@ impl App {
             copied: String::new(),
             copied_file: false,
             clip_atoms,
+            dnd,
+            drag: None,
+            dialog: None,
+            pending_paths: Vec::new(),
+            dropped: String::new(),
+            drop_moved: false,
             owns_clipboard: false,
             last_click: (0, usize::MAX),
         };
@@ -592,6 +750,62 @@ impl App {
             Ok("about") => self.about = true,
             // Copy as a real key press would, then quit: the copy must survive.
             Ok("copy") => self.act(Action::CopyFile, 123_456_789),
+            Ok(hook) if hook.starts_with("drag:") => {
+                // drag:XID:X:Y, numbers in decimal.
+                let n: Vec<i64> = hook.split(':').skip(1).filter_map(|v| v.parse().ok()).collect();
+                if let [xid, x, y] = n[..] {
+                    self.simulate_drag(xid as u32, (x as i32, y as i32))?;
+                }
+                return Ok(());
+            }
+            Ok("select3") => self.marks = (0..3.min(self.hits.len())).collect(),
+            Ok("confirm3") => {
+                self.marks = (0..3.min(self.hits.len())).collect();
+                self.act(Action::Trash, 0);
+            }
+            Ok("copy3-quit") => {
+                self.marks = (0..3.min(self.hits.len())).collect();
+                self.act(Action::CopyFile, 0);
+                return Ok(());
+            }
+            Ok("confirm") => self.act(Action::Trash, 0),
+            Ok("confirm-forever") => self.act(Action::DeleteForever, 0),
+            Ok("prefs") => self.act(Action::Preferences, 0),
+            Ok("ghost") => {
+                // Saves the drag image of the selected result and exits.
+                if let (Some(&id), Some(file)) = (self.hits.get(self.sel), std::env::var_os("FF_GUI_SNAPSHOT")) {
+                    let icon = Icon::of(self.index.name(id), self.index.is_dir(id), self.index.is_symlink(id));
+                    let mut drag = Drag::new(self.index.path(id).to_string_lossy().into_owned(), (0, 0), icon);
+                    self.drag_ghost_create(&mut drag)?;
+                    let cv = &drag.ghost_cv;
+                    let mut ppm = format!("P6 {} {} 255\n", cv.w, cv.h).into_bytes();
+                    ppm.extend(cv.px.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0]]));
+                    std::fs::write(file, ppm)?;
+                }
+                return Ok(());
+            }
+            Ok("trash-all-now") => {
+                // Trashes every result of the query without asking (tests only).
+                self.marks = (0..self.hits.len()).collect();
+                self.pending_paths = self.selected_paths();
+                self.act(Action::ConfirmTrash, 0);
+                eprintln!("{} | results left: {}", self.status, self.hits.len());
+                return Ok(());
+            }
+            Ok("trash-now") => {
+                // Trashes the selected result without asking (tests only).
+                if self.sel < self.hits.len() {
+                    self.pending_paths = self.selected_paths();
+                    self.act(Action::ConfirmTrash, 0);
+                    eprintln!("{} | results left: {}", self.status, self.hits.len());
+                }
+                return Ok(());
+            }
+            Ok("proxies") => {
+                // Lists the drop-aware windows (written to FF_GUI_DEBUG).
+                self.drop_proxies()?;
+                return Ok(());
+            }
             Ok("copy-quit") => {
                 self.act(Action::CopyFile, 123_456_789);
                 return Ok(());
@@ -609,6 +823,9 @@ impl App {
             while let Ok(notice) = self.notices.try_recv() {
                 self.status = notice;
                 dirty = true;
+                // A background job ended: a preferences dialog may be stale.
+                self.refresh_option_states();
+                self.render_dialog()?;
             }
             // Redraw only once the event queue is drained.
             // While idle, wake once a second to notice a refreshed index.
@@ -620,15 +837,41 @@ impl App {
                 }
                 self.render()?;
                 if let Some(path) = std::env::var_os("FF_GUI_SNAPSHOT") {
-                    let mut ppm = format!("P6 {} {} 255\n", self.cv.w, self.cv.h).into_bytes();
-                    ppm.extend(self.cv.px.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0]]));
+                    // A test snapshot shows the dialog if one is open.
+                    let cv = self.dialog.as_ref().map_or(&self.cv, |d| &d.cv);
+                    let mut ppm = format!("P6 {} {} 255\n", cv.w, cv.h).into_bytes();
+                    ppm.extend(cv.px.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0]]));
                     return std::fs::write(path, ppm);
                 }
                 dirty = false;
                 continue;
             };
             let at = |i| u16at(&ev, i) as i16 as i32;
-            match ev[0] & 0x7f {
+            // Which of our windows is this about? Input events name it at
+            // offset 12, Expose and ClientMessage at 4, ConfigureNotify at 8.
+            let code = ev[0] & 0x7f;
+            let window = match code {
+                EV_KEY_PRESS | EV_BUTTON_PRESS | EV_BUTTON_RELEASE | EV_MOTION => u32at(&ev, 12),
+                EV_EXPOSE | EV_CLIENT_MESSAGE => u32at(&ev, 4),
+                EV_CONFIGURE => u32at(&ev, 8),
+                _ => self.win,
+            };
+            if let Some(dialog) = self.dialog.as_ref().map(|d| d.win) {
+                if window == dialog {
+                    self.dialog_event(&ev)?;
+                    dirty = true; // its action may have changed the main window
+                    continue;
+                }
+                // The dialog is modal: the main window takes no input meanwhile.
+                if matches!(code, EV_KEY_PRESS | EV_BUTTON_PRESS | EV_MOTION) {
+                    continue;
+                }
+            }
+            if window != self.win && matches!(code, EV_EXPOSE | EV_CONFIGURE) {
+                self.drag_ghost_redraw(window)?; // only the drag image can be exposed here
+                continue;
+            }
+            match code {
                 EV_EXPOSE => {
                     self.shown.clear();
                     dirty = true;
@@ -654,19 +897,27 @@ impl App {
                     dirty = true;
                 }
                 EV_BUTTON_RELEASE if ev[1] == 1 => {
+                    debug("button released");
                     self.dragging_scrollbar = false;
                     self.selecting = false;
+                    let dragged = self.drag_end(u32at(&ev, 4));
+                    // A plain click on one of several selected rows.
+                    if let Some(row) = self.collapse_on_release.take().filter(|_| !dragged) {
+                        self.select_only(row);
+                    }
+                    dirty = true;
+                }
+                EV_MOTION if self.drag.is_some() => {
+                    dirty |= self.drag_motion((at(24), at(26)), (at(20), at(22)), u32at(&ev, 4), u16at(&ev, 28))?;
                 }
                 EV_MOTION => {
                     let hover = self.title_button_at(at(24), at(26));
                     dirty |= std::mem::replace(&mut self.hover_button, hover) != hover;
                     dirty |= self.motion(at(24), at(26));
                 }
-                EV_SELECTION_REQUEST => {
-                    let (text, atoms) = (self.copied.clone(), self.clip_atoms);
-                    serve_selection(&mut self.c, &ev, &text, self.copied_file, &atoms);
-                }
-                EV_SELECTION_CLEAR => self.owns_clipboard = false, // someone else copied
+                EV_SELECTION_REQUEST => self.selection_request(&ev),
+                // Someone else copied.
+                EV_SELECTION_CLEAR if u32at(&ev, 12) == self.clipboard => self.owns_clipboard = false,
                 EV_SELECTION_NOTIFY if u32at(&ev, 20) != 0 => {
                     let data = self.c.get_property(self.win, self.paste_prop, true)?;
                     let text = String::from_utf8_lossy(&data);
@@ -674,7 +925,8 @@ impl App {
                     self.insert(&line);
                     dirty = true;
                 }
-                EV_CLIENT_MESSAGE if u32at(&ev, 12) == self.wm_delete => return Ok(()),
+                EV_CLIENT_MESSAGE if u32at(&ev, 12) == self.wm_delete && window == self.win => return Ok(()),
+                EV_CLIENT_MESSAGE => dirty |= self.dnd_message(&ev),
                 EV_MAPPING => self.c.load_keymap()?,
                 _ => {}
             }
@@ -693,6 +945,8 @@ impl App {
         self.hits = self.index.search(&Query::parse_with(&self.query, self.case), &opts);
         self.sel = 0;
         self.top = 0;
+        self.marks.clear();
+        self.anchor_row = 0;
     }
 
     // ---- search box editing -------------------------------------------
@@ -769,12 +1023,17 @@ impl App {
     fn copy(&mut self, text: String, file: bool) {
         self.owns_clipboard = own_clipboard(&mut self.c, self.win, self.clipboard).unwrap_or(false);
         self.copied_file = file;
-        self.status = if self.owns_clipboard && file {
-            format!("Copied the file {text} (paste it in a file manager)")
-        } else if self.owns_clipboard {
-            format!("Copied {text}")
-        } else {
+        let lines = text.lines().count();
+        self.status = if !self.owns_clipboard {
             "Could not copy: the clipboard is not available".into()
+        } else if file && lines > 1 {
+            format!("Copied {lines} files (paste them in a file manager)")
+        } else if file {
+            format!("Copied the file {text} (paste it in a file manager)")
+        } else if lines > 1 {
+            format!("Copied {lines} lines")
+        } else {
+            format!("Copied {text}")
         };
         self.copied = text;
     }
@@ -868,6 +1127,10 @@ impl App {
                 return;
             }
             Action::SelectAll => return (self.anchor, self.cursor) = (0, self.query.len()),
+            Action::SelectAllResults => {
+                self.marks = (0..self.hits.len()).collect();
+                return;
+            }
             Action::Show(kind) => {
                 self.kind = kind;
                 return self.search();
@@ -883,6 +1146,48 @@ impl App {
                 return;
             }
             Action::About => return self.about = true,
+            Action::Preferences => {
+                self.refresh_option_states();
+                let rows = vec![
+                    Row::Dim("Window".into()),
+                    Row::Check("Title bar with the application icon", Action::ToggleTitleBar),
+                    Row::Pair("Zoom", format!("{:.0}%  (Ctrl +, Ctrl -, Ctrl 0)", self.scale * 100.0)),
+                    Row::Gap,
+                    Row::Dim("Desktop".into()),
+                    Row::Check("Global shortcut Alt+E opens Fast search", Action::ToggleShortcut),
+                    Row::Check("Show in the applications menu", Action::ToggleLauncher),
+                    Row::Gap,
+                    Row::Dim("Index".into()),
+                    Row::Check("Live updates service (asks for your password)", Action::ToggleDaemon),
+                    Row::Pair("Index file", self.db.display().to_string()),
+                ];
+                if let Err(e) = self.open_dialog("Preferences", rows, vec![("Close", None)], 0, false) {
+                    self.status = e.to_string();
+                }
+                return;
+            }
+            Action::ConfirmTrash | Action::ConfirmDelete => {
+                let paths = std::mem::take(&mut self.pending_paths);
+                let trash = action == Action::ConfirmTrash;
+                let mut failures = Vec::new();
+                for path in &paths {
+                    if let Err(e) = if trash { desktop::trash(path) } else { desktop::delete(path) } {
+                        failures.push(format!("{}: {e}", path.display()));
+                    }
+                }
+                let done = paths.len() - failures.len();
+                let what = match &paths[..] {
+                    [one] => one.display().to_string(),
+                    _ => format!("{done} items"),
+                };
+                self.status = match (&failures[..], trash) {
+                    ([], true) => format!("Moved {what} to the trash"),
+                    ([], false) => format!("Deleted {what}"),
+                    ([one], _) if paths.len() == 1 => one.clone(),
+                    (failed, _) => format!("{done} done, {} failed; first: {}", failed.len(), failed[0]),
+                };
+                return self.forget(&paths);
+            }
             Action::Quit => return self.quit = true,
             Action::ZoomIn => return self.set_scale(Some(self.scale + 0.25)),
             Action::ZoomOut => return self.set_scale(Some(self.scale - 0.25)),
@@ -920,26 +1225,72 @@ impl App {
         }
         let Some(&id) = self.hits.get(self.sel) else { return };
         let path = self.index.path(id);
+        // Open, copy and delete apply to the whole selection; the rest
+        // to the current row.
+        let paths = self.selected_paths();
+        let many = paths.len() > 1;
+        let lines = |paths: &[PathBuf]| paths.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>().join("\n");
         match action {
+            Action::Open if paths.len() > 20 => {
+                self.status = format!("{} results selected: open at most 20 at a time", paths.len());
+            }
             Action::Open => {
-                self.status = format!("Opening {}", path.display());
-                std::thread::spawn(move || desktop::open(&path));
+                self.status = if many { format!("Opening {} items", paths.len()) } else { format!("Opening {}", path.display()) };
+                std::thread::spawn(move || paths.iter().for_each(|p| drop(desktop::open(p))));
             }
             Action::Reveal => {
                 self.status = format!("Showing {} in the file manager", path.display());
                 std::thread::spawn(move || desktop::reveal(&path));
             }
+            Action::Trash | Action::DeleteForever => {
+                let forever = action == Action::DeleteForever;
+                let what = if many {
+                    format!("these {} items", paths.len())
+                } else if self.index.is_dir(id) {
+                    "this folder and everything in it".into()
+                } else {
+                    "this file".into()
+                };
+                let question = if forever {
+                    format!("Permanently delete {what}? This cannot be undone.")
+                } else {
+                    format!("Move {what} to the trash?")
+                };
+                let mut rows = vec![Row::Text(question), Row::Gap];
+                if many {
+                    // Show the first few, so it is clear what is about to go.
+                    rows.extend(paths.iter().take(6).map(|p| Row::Dim(p.display().to_string())));
+                    if paths.len() > 6 {
+                        rows.push(Row::Dim(format!("... and {} more", paths.len() - 6)));
+                    }
+                } else {
+                    let name = String::from_utf8_lossy(self.index.name(id)).into_owned();
+                    let location = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+                    rows.extend([Row::Pair("Name", name), Row::Pair("Location", location)]);
+                }
+                let (title, buttons, focus) = if forever {
+                    // Enter cancels; deleting for good takes a deliberate click or Tab.
+                    ("Delete permanently", vec![("Cancel", None), ("Delete permanently", Some(Action::ConfirmDelete))], 0)
+                } else {
+                    ("Move to trash", vec![("Cancel", None), ("Move to trash", Some(Action::ConfirmTrash))], 1)
+                };
+                self.pending_paths = paths;
+                if let Err(e) = self.open_dialog(title, rows, buttons, focus, forever) {
+                    self.status = e.to_string();
+                }
+            }
             Action::Edit => {
                 self.status = format!("Opening {} in the text editor", path.display());
                 std::thread::spawn(move || desktop::open_in_editor(&path));
             }
-            Action::CopyFile => self.copy(path.to_string_lossy().into_owned(), true),
-            Action::CopyPath | Action::CopyName => {
-                let text = match action {
-                    Action::CopyName => String::from_utf8_lossy(self.index.name(id)).into_owned(),
-                    _ => path.to_string_lossy().into_owned(),
-                };
-                self.copy(text, false);
+            Action::CopyFile => self.copy(lines(&paths), true),
+            Action::CopyPath => self.copy(lines(&paths), false),
+            Action::CopyName => {
+                let names: Vec<String> = paths
+                    .iter()
+                    .map(|p| p.file_name().map_or_else(|| p.to_string_lossy(), |n| n.to_string_lossy()).into_owned())
+                    .collect();
+                self.copy(names.join("\n"), false);
             }
             Action::Properties => match desktop::properties(&path) {
                 Ok(props) => self.props = Some(props),
@@ -955,6 +1306,31 @@ impl App {
         let Some(&id) = self.hits.get(self.sel) else { return CONTEXT_MENU };
         let icon = Icon::of(self.index.name(id), self.index.is_dir(id), self.index.is_symlink(id));
         if matches!(icon, Icon::Text | Icon::Code | Icon::File | Icon::Link) { TEXT_CONTEXT_MENU } else { CONTEXT_MENU }
+    }
+
+    /// Re-reads the state of the options that live outside this program.
+    fn refresh_option_states(&mut self) {
+        self.shortcut_on = settings::shortcut_enabled();
+        self.launcher_on = settings::launcher_installed();
+        self.daemon_on = settings::daemon_installed();
+    }
+
+    /// Makes the results reflect that `paths` were just removed, without
+    /// waiting for the next index refresh.
+    fn forget(&mut self, paths: &[PathBuf]) {
+        use std::os::unix::ffi::OsStrExt;
+        let changes: std::collections::HashSet<_> = paths
+            .iter()
+            .filter_map(|p| Some((p.parent()?.as_os_str().as_bytes().to_vec(), p.file_name()?.as_bytes().to_vec())))
+            .collect();
+        // Checks the disk: an entry only goes if the file really is gone.
+        let mut live = ff_core::live::LiveIndex::new(std::mem::take(&mut self.index));
+        live.apply(&changes);
+        self.index = live.into_index();
+        let (sel, top) = (self.sel, self.top);
+        self.search();
+        self.sel = sel.min(self.hits.len().saturating_sub(1));
+        self.top = top.min(self.max_top());
     }
 
     /// True if a toggle or choice in a menu is currently on.
@@ -1004,6 +1380,338 @@ impl App {
     /// Closes the properties or About panel; true if one was open.
     fn close_panel(&mut self) -> bool {
         self.props.take().is_some() | std::mem::take(&mut self.about)
+    }
+
+    // ---- dragging results out (XDND source) ---------------------------
+
+    /// Answers a request for data we offer: the clipboard, or the file
+    /// being dragged.
+    fn selection_request(&mut self, ev: &[u8]) {
+        let atoms = self.clip_atoms;
+        if debug_enabled() {
+            let (selection, target) = (self.c.atom_name(u32at(ev, 16)), self.c.atom_name(u32at(ev, 20)));
+            debug(format!("window {:#x} asks for {selection} as {target}", u32at(ev, 12)));
+        }
+        if u32at(ev, 16) == self.dnd.selection {
+            let path = self.dropped.clone();
+            serve_selection(&mut self.c, ev, &path, true, &atoms);
+        } else {
+            let text = self.copied.clone();
+            serve_selection(&mut self.c, ev, &text, self.copied_file, &atoms);
+        }
+    }
+
+    /// Sends one XDND message about `target`; our window id goes first.
+    fn dnd_send(&mut self, target: &DropTarget, kind: u32, data: [u32; 4]) {
+        let [a, b, c, d] = data;
+        let event =
+            [W(target.dest), W(0), B(EV_CLIENT_MESSAGE), B(32), H(0), W(target.window), W(kind), W(self.win), W(a), W(b), W(c), W(d)];
+        self.c.req(25, 0, &event);
+    }
+
+    /// If `window` accepts drops, a target for it.
+    fn drop_target(&mut self, window: u32) -> io::Result<Option<DropTarget>> {
+        let aware = self.c.get_property(window, self.dnd.aware, false)?;
+        if aware.len() < 4 || window == self.win {
+            return Ok(None);
+        }
+        let proxy = self.c.get_property(window, self.dnd.proxy, false)?;
+        let dest = if proxy.len() >= 4 { u32at(&proxy, 0) } else { window };
+        let version = u32at(&aware, 0).min(5);
+        Ok(Some(DropTarget { window, dest, version, accepted: false, moves: false, waiting: false, pending: None }))
+    }
+
+    /// Creates the small image of the dragged result that follows the
+    /// pointer: its icon and name in a window of its own.
+    fn drag_ghost_create(&mut self, drag: &mut Drag) -> io::Result<()> {
+        let u = self.u;
+        let name = drag.label.clone();
+        let icon = self.icons.size as i32;
+        let w = (icon + self.text.width(&name) + 26 * u).min(420 * u);
+        let h = self.row_h() + 6 * u;
+        drag.ghost_cv.resize(w as usize, h as usize);
+        drag.ghost_cv.fill(0, 0, w, h, 0xf4f8fe);
+        drag.ghost_cv.frame(0, 0, w, h, u.max(1), 0x6fa0e0);
+        self.icons.draw(&mut drag.ghost_cv, 8 * u, (h - icon) / 2, drag.icon);
+        self.text.draw(&mut drag.ghost_cv, 14 * u + icon, (h - self.text.height) / 2, &name, w - icon - 22 * u, TEXT);
+
+        drag.ghost = self.c.new_id();
+        let c = &mut self.c;
+        // Unmanaged (override-redirect) so it can sit anywhere; we only
+        // need to know when to repaint it.
+        let body = [W(drag.ghost), W(c.root), H(0), H(0), H(w as u16), H(h as u16), H(0), H(1), W(0), W(0x200 | 0x800), W(1), W(0x8000)];
+        c.req(1, 0, &body);
+        let window_type = c.intern_atom("_NET_WM_WINDOW_TYPE")?;
+        let type_dnd = c.intern_atom("_NET_WM_WINDOW_TYPE_DND")?;
+        c.set_property(drag.ghost, window_type, ATOM_ATOM, 32, &type_dnd.to_le_bytes());
+        let (px, py) = self.pointer_root;
+        c.req(12, 0, &[W(drag.ghost), H(1 | 2), H(0), W((px + 14 * u) as u32), W((py + 18 * u) as u32)]);
+        c.req(8, 0, &[W(drag.ghost)]); // MapWindow
+        c.put_image(drag.ghost, self.gc, w as usize, 0, &drag.ghost_cv.px)
+    }
+
+    /// Repaints the drag image if `window` is it.
+    fn drag_ghost_redraw(&mut self, window: u32) -> io::Result<()> {
+        if let Some(drag) = self.drag.as_ref().filter(|d| d.ghost == window && d.ghost != 0) {
+            self.c.put_image(window, self.gc, drag.ghost_cv.w, 0, &drag.ghost_cv.px)?;
+        }
+        Ok(())
+    }
+
+    /// Top-level windows that accept drops without belonging to any
+    /// program's visible window: input-only and unmanaged. A Wayland
+    /// compositor shows one over a native Wayland window during a drag.
+    fn drop_proxies(&mut self) -> io::Result<Vec<u32>> {
+        let mut proxies = Vec::new();
+        for window in self.c.children(self.c.root)? {
+            if window == self.win || self.c.get_property(window, self.dnd.aware, false)?.len() < 4 {
+                continue;
+            }
+            let kind = self.c.window_kind(window)?;
+            debug(format!(
+                "drop-aware top-level {window:#x}: (input-only, viewable, unmanaged) = {kind:?}, geometry {:?}",
+                self.c.geometry(window)?
+            ));
+            if kind.is_some_and(|(input_only, _, unmanaged)| input_only && unmanaged) {
+                proxies.push(window);
+            }
+        }
+        debug(format!("compositor drop proxies: {proxies:x?}"));
+        Ok(proxies)
+    }
+
+    /// The drop-accepting window at a screen position: the outermost one
+    /// on the way down from the root window.
+    fn drop_target_at(&mut self, x: i32, y: i32) -> io::Result<Option<DropTarget>> {
+        let root = self.c.root;
+        let mut window = root;
+        for _ in 0..16 {
+            // TranslateCoordinates also names the child window at the point.
+            let seq = self.c.req(40, 0, &[W(root), W(window), H(x as u16), H(y as u16)]);
+            let child = self.c.reply(seq)?.map_or(0, |r| u32at(&r, 8));
+            if child == 0 {
+                break;
+            }
+            window = child;
+            if let Some(target) = self.drop_target(window)? {
+                return Ok(Some(target));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Tells the target where the pointer is and what we would like it to
+    /// do with the files: move them, or copy them when `copy` is set.
+    fn dnd_send_position(&mut self, target: &mut DropTarget, x: i32, y: i32, time: u32, copy: bool) {
+        if target.waiting {
+            target.pending = Some((x, y, time)); // one position at a time
+            return;
+        }
+        target.waiting = true;
+        let at = ((x as u32 & 0xffff) << 16) | (y as u32 & 0xffff);
+        let action = if copy { self.dnd.action_copy } else { self.dnd.action_move };
+        self.dnd_send(target, self.dnd.position, [0, at, time, action]);
+    }
+
+    /// Moves the drag to a (possibly new) target under the pointer.
+    fn drag_over(&mut self, mut drag: Drag, new: Option<DropTarget>, root: (i32, i32), time: u32) -> Drag {
+        if drag.target.as_ref().map(|t| t.window) != new.as_ref().map(|t| t.window) {
+            if let Some(old) = drag.target.take() {
+                self.dnd_send(&old, self.dnd.leave, [0; 4]);
+                debug(format!("leave window {:#x}", old.window));
+            }
+            if let Some(target) = &new {
+                // Enter: protocol version, a flag saying the full list of
+                // formats is in XdndTypeList, and the first three of them.
+                let atoms = self.clip_atoms;
+                let first = [atoms.uri_list, atoms.text_plain_utf8, atoms.text_plain];
+                self.dnd_send(target, self.dnd.enter, [target.version << 24 | 1, first[0], first[1], first[2]]);
+                debug(format!("enter window {:#x} (messages to {:#x}, version {})", target.window, target.dest, target.version));
+            }
+            drag.target = new;
+        }
+        if let Some(mut target) = drag.target.take() {
+            self.dnd_send_position(&mut target, root.0, root.1, time, drag.copy);
+            drag.target = Some(target);
+        }
+        drag
+    }
+
+    /// Pointer moved with the button held on a result; true to redraw.
+    fn drag_motion(&mut self, at: (i32, i32), root: (i32, i32), time: u32, state: u16) -> io::Result<bool> {
+        let Some(mut drag) = self.drag.take() else { return Ok(false) };
+        let mut redraw = false;
+        drag.copy = state & MOD_CTRL != 0;
+        if !drag.active {
+            let far = (at.0 - drag.start.0).abs().max((at.1 - drag.start.1).abs()) > 6 * self.u;
+            if !far {
+                self.drag = Some(drag);
+                return Ok(false);
+            }
+            // Becoming a drag: the data is offered through this selection.
+            drag.active = true;
+            self.dropped = drag.path.clone();
+            // Every format we offer, for targets that read the full list.
+            let a = self.clip_atoms;
+            let types: Vec<u8> = [a.uri_list, a.text_plain_utf8, a.text_plain, a.utf8_string, ATOM_STRING]
+                .iter()
+                .flat_map(|t| t.to_le_bytes())
+                .collect();
+            self.c.set_property(self.win, self.dnd.type_list, ATOM_ATOM, 32, &types);
+            self.c.req(22, 0, &[W(self.win), W(self.dnd.selection), W(0)]);
+            debug(format!("drag started for {} (our window {:#x})", drag.path, self.win));
+            drag.proxies = self.drop_proxies()?;
+            self.drag_ghost_create(&mut drag)?;
+            self.status = format!("Dragging {} - drop it on another window to move it (hold Ctrl to copy)", drag.label);
+            redraw = true;
+        }
+        let mut target = self.drop_target_at(root.0, root.1)?;
+        if target.is_none() {
+            // Nothing found by position. A compositor's drop proxy that is
+            // currently shown means the pointer is over a Wayland program.
+            for i in 0..drag.proxies.len() {
+                let proxy = drag.proxies[i];
+                if self.c.window_kind(proxy)?.is_some_and(|(_, viewable, _)| viewable) {
+                    target = self.drop_target(proxy)?;
+                    break;
+                }
+            }
+        }
+        if drag.ghost != 0 {
+            // ConfigureWindow x, y: follow the pointer, just clear of it so
+            // the image is never the window under the pointer.
+            let (gx, gy) = (root.0 + 14 * self.u, root.1 + 18 * self.u);
+            self.c.req(12, 0, &[W(drag.ghost), H(1 | 2), H(0), W(gx as u32), W(gy as u32)]);
+        }
+        drag.motions += 1;
+        if debug_enabled() && drag.motions % 15 == 1 {
+            let seq = self.c.req(40, 0, &[W(self.c.root), W(self.c.root), H(root.0 as u16), H(root.1 as u16)]);
+            let top = self.c.reply(seq)?.map_or(0, |r| u32at(&r, 8));
+            let mut line = format!("motion {} at {root:?}: top window {top:#x};", drag.motions);
+            for i in 0..drag.proxies.len() {
+                let p = drag.proxies[i];
+                line += &format!(" proxy {p:#x} {:?} at {:?};", self.c.window_kind(p)?, self.c.geometry(p)?);
+            }
+            debug(line);
+        }
+        if debug_enabled() && target.as_ref().map(|t| t.window) != drag.target.as_ref().map(|t| t.window) {
+            debug(format!("pointer at {root:?}: drop target {:x?}", target.as_ref().map(|t| t.window)));
+        }
+        self.drag = Some(self.drag_over(drag, target, root, time));
+        Ok(redraw)
+    }
+
+    /// Button released: drop on the target if it accepted, else cancel.
+    fn drag_end(&mut self, time: u32) -> bool {
+        let Some(drag) = self.drag.take() else { return false };
+        if !drag.active {
+            return false; // it was just a click
+        }
+        if drag.ghost != 0 {
+            self.c.req(4, 0, &[W(drag.ghost)]); // DestroyWindow
+        }
+        match &drag.target {
+            Some(t) => debug(format!("released over window {:#x}: accepted={} waiting={}", t.window, t.accepted, t.waiting)),
+            None => debug("released over no drop target"),
+        }
+        match drag.target {
+            Some(target) if target.accepted => {
+                self.dnd_send(&target, self.dnd.drop, [0, time, 0, 0]);
+                self.status = format!("{} {}", if target.moves { "Moved" } else { "Copied" }, drag.label);
+                // Once the target reports it is done, moved files leave the list.
+                self.drop_moved = target.moves;
+            }
+            Some(target) => {
+                self.dnd_send(&target, self.dnd.leave, [0; 4]);
+                self.status.clear();
+            }
+            None => self.status.clear(),
+        }
+        true
+    }
+
+    /// A message from a drop target; true to redraw.
+    fn dnd_message(&mut self, ev: &[u8]) -> bool {
+        let (kind, from) = (u32at(ev, 8), u32at(ev, 12));
+        if kind == self.dnd.finished {
+            debug(format!("window {from:#x} finished the drop (success flag {})", u32at(ev, 16) & 1));
+            if std::mem::take(&mut self.drop_moved) {
+                // The files were moved away: drop them from the results
+                // (only those really gone from disk are removed).
+                let paths: Vec<PathBuf> = self.dropped.lines().map(PathBuf::from).collect();
+                self.forget(&paths);
+                return true;
+            }
+        }
+        if kind != self.dnd.status {
+            return false;
+        }
+        // The action the target settled on. (Old targets name none; they copy.)
+        let (accept, action) = (u32at(ev, 16) & 1 != 0, u32at(ev, 28));
+        let moves = action == self.dnd.action_move;
+        if debug_enabled() {
+            let name = if action == 0 { "none".into() } else { self.c.atom_name(action) };
+            debug(format!("status from {from:#x}: accept={accept} action={name}"));
+        }
+        let Some(mut drag) = self.drag.take() else { return false };
+        let mut redraw = false;
+        if let Some(target) = drag.target.as_mut().filter(|t| t.window == from) {
+            if (accept, moves) != (target.accepted, target.moves) {
+                self.status = match (accept, moves) {
+                    (false, _) => format!("Dragging {} - cannot be dropped here", drag.label),
+                    (true, true) => format!("Dragging {} - release to move it here (hold Ctrl to copy)", drag.label),
+                    (true, false) => format!("Dragging {} - release to copy it here", drag.label),
+                };
+                redraw = true;
+            }
+            target.accepted = accept;
+            target.moves = moves;
+            target.waiting = false;
+            if let Some((x, y, time)) = target.pending.take() {
+                let (copy, mut t) = (drag.copy, drag.target.take().unwrap());
+                self.dnd_send_position(&mut t, x, y, time, copy);
+                drag.target = Some(t);
+            }
+        }
+        self.drag = Some(drag);
+        redraw
+    }
+
+    /// Test hook: drags the selected result onto window `xid` at a screen
+    /// position without a mouse, and reports what happened on stderr.
+    fn simulate_drag(&mut self, xid: u32, root: (i32, i32)) -> io::Result<()> {
+        let Some(&id) = self.hits.get(self.sel) else { return Ok(()) };
+        let path = self.index.path(id).to_string_lossy().into_owned();
+        self.drag = Some(Drag::new(path, (0, 0), Icon::File));
+        self.drag_motion((1000, 1000), root, 0, 0)?;
+        let found = self.drag.as_ref().and_then(|d| d.target.as_ref()).map(|t| t.window);
+        eprintln!("window found at {root:?}: {found:x?} (expected {xid:x})");
+        // Whatever is at that position, exercise the protocol with `xid`.
+        let (drag, target) = (self.drag.take().unwrap(), self.drop_target(xid)?);
+        eprintln!("target accepts drops: {}", target.is_some());
+        self.drag = Some(self.drag_over(drag, target, root, 0));
+        let pump = |app: &mut App, ms: u64| -> io::Result<()> {
+            let until = std::time::Instant::now() + Duration::from_millis(ms);
+            while std::time::Instant::now() < until {
+                let Some(ev) = app.c.next_event(Some(Duration::from_millis(50)))? else { continue };
+                match ev[0] & 0x7f {
+                    EV_CLIENT_MESSAGE if u32at(&ev, 8) == app.dnd.finished => eprintln!("target finished the drop"),
+                    EV_CLIENT_MESSAGE => drop(app.dnd_message(&ev)),
+                    EV_SELECTION_REQUEST => {
+                        eprintln!("target asked for the data");
+                        app.selection_request(&ev);
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        };
+        pump(self, 600)?;
+        let accepted = self.drag.as_ref().and_then(|d| d.target.as_ref()).is_some_and(|t| t.accepted);
+        eprintln!("target accepted the position: {accepted}");
+        self.drag_end(0);
+        eprintln!("status: {}", self.status);
+        pump(self, 1200)
     }
 
     // ---- our own title bar --------------------------------------------
@@ -1126,9 +1834,7 @@ impl App {
 
     fn open_bar_menu(&mut self, i: usize) {
         if BAR[i].0 == "Options" {
-            self.shortcut_on = settings::shortcut_enabled();
-            self.launcher_on = settings::launcher_installed();
-            self.daemon_on = settings::daemon_installed();
+            self.refresh_option_states();
         }
         let (x, _) = self.bar_titles()[i];
         self.menu = Some(Menu { x, y: self.menu_h(), hover: None, items: BAR[i].1, bar: Some(i) });
@@ -1142,9 +1848,53 @@ impl App {
         self.hits.len().saturating_sub(self.rows_visible())
     }
 
-    fn move_sel(&mut self, delta: isize) {
+    fn is_selected(&self, row: usize) -> bool {
+        if self.marks.is_empty() { row == self.sel } else { self.marks.contains(&row) }
+    }
+
+    /// The selected rows, in list order.
+    fn selected_rows(&self) -> Vec<usize> {
+        if self.marks.is_empty() {
+            return if self.sel < self.hits.len() { vec![self.sel] } else { Vec::new() };
+        }
+        self.marks.iter().copied().filter(|&r| r < self.hits.len()).collect()
+    }
+
+    fn selected_paths(&self) -> Vec<PathBuf> {
+        self.selected_rows().into_iter().map(|r| self.index.path(self.hits[r])).collect()
+    }
+
+    /// Makes `row` the only selected row.
+    fn select_only(&mut self, row: usize) {
+        self.sel = row;
+        self.anchor_row = row;
+        self.marks.clear();
+    }
+
+    /// Selects everything from where the selection started up to `row`.
+    fn select_range_to(&mut self, row: usize) {
+        self.sel = row;
+        let (a, b) = (self.anchor_row.min(row), self.anchor_row.max(row));
+        self.marks = (a..=b).collect();
+    }
+
+    /// Adds `row` to the selection or takes it out (Ctrl+click).
+    fn toggle_row(&mut self, row: usize) {
+        if self.marks.is_empty() && self.sel < self.hits.len() {
+            self.marks.insert(self.sel);
+        }
+        if !self.marks.remove(&row) {
+            self.marks.insert(row);
+        }
+        self.sel = row;
+        self.anchor_row = row;
+    }
+
+    /// Moves the current row; `extend` (Shift) grows the selection to it.
+    fn move_sel(&mut self, delta: isize, extend: bool) {
         let last = self.hits.len().saturating_sub(1);
-        self.sel = self.sel.saturating_add_signed(delta).min(last);
+        let to = self.sel.saturating_add_signed(delta).min(last);
+        if extend { self.select_range_to(to) } else { self.select_only(to) }
         let rows = self.rows_visible();
         if self.sel < self.top {
             self.top = self.sel;
@@ -1195,6 +1945,7 @@ impl App {
                 '+' | '=' => self.act(Action::ZoomIn, time),
                 '-' => self.act(Action::ZoomOut, time),
                 '0' => self.act(Action::ZoomReset, time),
+                'a' if shift => self.act(Action::SelectAllResults, time),
                 'a' => self.act(Action::SelectAll, time),
                 'c' if shift => self.act(Action::CopyPath, time),
                 'c' => self.act(Action::Copy, time),
@@ -1206,6 +1957,11 @@ impl App {
             },
             Key::Char(ch) if !alt && !ch.is_control() => self.insert(ch.encode_utf8(&mut [0; 4])),
             Key::Sym(K_BACKSPACE) => self.delete_to(self.step(self.cursor, false, ctrl)),
+            // With nothing after the caret to delete, Delete means the
+            // selected result: to the trash, or for good with Shift.
+            Key::Sym(K_DELETE) if self.cursor == self.query.len() && sel_start == sel_end => {
+                self.act(if shift { Action::DeleteForever } else { Action::Trash }, time);
+            }
             Key::Sym(K_DELETE) => self.delete_to(self.step(self.cursor, true, ctrl)),
             Key::Sym(K_LEFT | K_RIGHT) => {
                 let right = matches!(key, Key::Sym(K_RIGHT));
@@ -1240,12 +1996,12 @@ impl App {
                 let y = self.list_top() + (row + 1) * self.row_h();
                 self.menu = Some(Menu { x: 40 * self.u, y, hover: Some(0), items: self.context_items(), bar: None });
             }
-            Key::Sym(K_UP) => self.move_sel(-1),
-            Key::Sym(K_DOWN) => self.move_sel(1),
-            Key::Sym(K_PAGE_UP) => self.move_sel(-page),
-            Key::Sym(K_PAGE_DOWN) => self.move_sel(page),
-            Key::Sym(K_HOME) => self.move_sel(isize::MIN),
-            Key::Sym(K_END) => self.move_sel(isize::MAX),
+            Key::Sym(K_UP) => self.move_sel(-1, shift),
+            Key::Sym(K_DOWN) => self.move_sel(1, shift),
+            Key::Sym(K_PAGE_UP) => self.move_sel(-page, shift),
+            Key::Sym(K_PAGE_DOWN) => self.move_sel(page, shift),
+            Key::Sym(K_HOME) => self.move_sel(isize::MIN, shift),
+            Key::Sym(K_END) => self.move_sel(isize::MAX, shift),
             Key::Sym(K_F2) => {
                 self.kind = match self.kind {
                     Kind::Any => Kind::File,
@@ -1320,15 +2076,46 @@ impl App {
             }
             1 | 3 if y >= self.list_top() => {
                 let Some(row) = self.row_at(y) else { return };
-                self.sel = row;
+                debug(format!("press button {button} on row {row}"));
                 self.status.clear();
                 if button == 3 {
+                    // The menu acts on the selection; a right-click outside
+                    // it selects that row instead.
+                    if !self.is_selected(row) {
+                        self.select_only(row);
+                    }
+                    self.sel = row;
                     self.menu = Some(Menu { x, y, hover: None, items: self.context_items(), bar: None });
                     return;
+                }
+                if state & MOD_SHIFT != 0 {
+                    self.select_range_to(row);
+                } else if state & MOD_CTRL != 0 {
+                    self.toggle_row(row);
+                } else if self.is_selected(row) && self.marks.len() > 1 {
+                    // Keep the group for now: this may be the start of
+                    // dragging all of it.
+                    self.sel = row;
+                    self.collapse_on_release = Some(row);
+                } else {
+                    self.select_only(row);
+                }
+                // A press on a selected result may turn into a drag once
+                // the pointer moves; it carries the whole selection.
+                if self.is_selected(row) {
+                    let paths: Vec<String> = self.selected_paths().iter().map(|p| p.to_string_lossy().into_owned()).collect();
+                    let id = self.hits[row];
+                    let icon = match paths.len() {
+                        1 => Icon::of(self.index.name(id), self.index.is_dir(id), self.index.is_symlink(id)),
+                        _ => Icon::File,
+                    };
+                    self.drag = Some(Drag::new(paths.join("\n"), (x, y), icon));
                 }
                 let (last_time, last_row) = self.last_click;
                 if last_row == row && time.wrapping_sub(last_time) < 400 {
                     // Double-click: the path column shows the folder.
+                    self.select_only(row);
+                    self.collapse_on_release = None;
                     let [_, (path_x, path_w), ..] = self.columns();
                     let on_path = x >= path_x && x < path_x + path_w;
                     self.act(if on_path { Action::Reveal } else { Action::Open }, time);
@@ -1520,7 +2307,7 @@ impl App {
         for row in 0..rows {
             let Some(&id) = self.hits.get(self.top + row) else { break };
             let y = list_top + row as i32 * row_h;
-            let selected = self.top + row == self.sel;
+            let selected = self.is_selected(self.top + row);
             let (fg, dim) = if selected { (WHITE, WHITE) } else { (TEXT, DIM) };
             if selected {
                 self.cv.fill(0, y, w - bar, row_h, SELECT);
@@ -1565,7 +2352,10 @@ impl App {
         let status = if self.status.is_empty() {
             let kind = ["all", "files", "folders"][self.kind as usize];
             let case = ["smart", "sensitive", "insensitive"][self.case as usize];
-            let n = group_digits(self.hits.len() as u64);
+            let mut n = group_digits(self.hits.len() as u64);
+            if self.marks.len() > 1 {
+                n = format!("{} of {n}", group_digits(self.marks.len() as u64));
+            }
             format!("{n} objects      F2 show: {kind}      F3 case: {case}      F5 reindex      Right-click for actions")
         } else {
             self.status.clone()
