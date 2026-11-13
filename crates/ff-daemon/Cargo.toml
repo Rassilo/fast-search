@@ -1,0 +1,13 @@
+[package]
+name = "ff-daemon"
+description = "ffd: root daemon that keeps the ff index current using fanotify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ffd"
+path = "src/main.rs"
+
+[dependencies]
+ff-core = { path = "../ff-core" }

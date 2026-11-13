@@ -1,0 +1,13 @@
+[package]
+name = "ff-cli"
+description = "ff: instant file search from the command line"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ff"
+path = "src/main.rs"
+
+[dependencies]
+ff-core = { path = "../ff-core" }

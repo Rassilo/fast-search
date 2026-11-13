@@ -1,0 +1,7 @@
+# Fully static binaries (musl), linked with the linker that ships with Rust,
+# so no system C toolchain is needed.
+[build]
+target = "x86_64-unknown-linux-musl"
+
+[target.x86_64-unknown-linux-musl]
+linker = "rust-lld"

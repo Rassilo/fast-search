@@ -1,0 +1,539 @@
+//! Client-side drawing: a pixel buffer, anti-aliased text and file icons.
+
+use std::collections::{HashMap, HashSet};
+use std::io;
+use std::process::Command;
+
+/// The window content as 32-bit BGRX pixels, ready to send to the X server.
+pub struct Canvas {
+    pub w: usize,
+    pub h: usize,
+    pub px: Vec<u8>,
+    /// Horizontal clip range (x0, x1) applied to all drawing.
+    pub clip: (i32, i32),
+}
+
+fn bgr(color: u32) -> [u8; 3] {
+    [color as u8, (color >> 8) as u8, (color >> 16) as u8]
+}
+
+impl Canvas {
+    pub fn new() -> Canvas {
+        Canvas { w: 0, h: 0, px: Vec::new(), clip: (0, i32::MAX) }
+    }
+
+    pub fn resize(&mut self, w: usize, h: usize) {
+        (self.w, self.h) = (w, h);
+        self.px.clear();
+        self.px.resize(w * h * 4, 0xff);
+    }
+
+    /// Fills a rectangle (clipped to the canvas) with an 0xRRGGBB color.
+    pub fn fill(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
+        let clamp = |v: i32, max: usize| v.clamp(0, max as i32) as usize;
+        let (x0, x1) = (clamp(x.max(self.clip.0), self.w), clamp(x.saturating_add(w).min(self.clip.1), self.w));
+        let x1 = x1.max(x0);
+        let (y0, y1) = (clamp(y, self.h), clamp(y.saturating_add(h), self.h));
+        let [b, g, r] = bgr(color);
+        for row in y0..y1 {
+            let start = row * self.w * 4;
+            for p in self.px[start + x0 * 4..start + x1 * 4].chunks_exact_mut(4) {
+                p.copy_from_slice(&[b, g, r, 0]);
+            }
+        }
+    }
+
+    /// A 1-`t`-thick rectangle outline.
+    pub fn frame(&mut self, x: i32, y: i32, w: i32, h: i32, t: i32, color: u32) {
+        self.fill(x, y, w, t, color);
+        self.fill(x, y + h - t, w, t, color);
+        self.fill(x, y, t, h, color);
+        self.fill(x + w - t, y, t, h, color);
+    }
+
+    /// Mixes `color` (B, G, R) into one pixel with opacity `alpha` (0-255).
+    fn blend(&mut self, x: i32, y: i32, color: [u8; 3], alpha: u32) {
+        let clipped = x < self.clip.0 || x >= self.clip.1;
+        if alpha == 0 || clipped || x < 0 || y < 0 || x as usize >= self.w || y as usize >= self.h {
+            return;
+        }
+        let i = (y as usize * self.w + x as usize) * 4;
+        for k in 0..3 {
+            let dst = self.px[i + k] as u32;
+            self.px[i + k] = ((dst * (255 - alpha) + color[k] as u32 * alpha + 127) / 255) as u8;
+        }
+    }
+}
+
+struct Glyph {
+    advance: f32,
+    /// Offset of the bitmap from the pen position and the baseline.
+    left: i32,
+    top: i32,
+    w: usize,
+    coverage: Vec<u8>,
+}
+
+type Point = (f32, f32);
+
+/// Collects a glyph outline as straight segments in pixel space (y down).
+struct Outline {
+    scale: f32,
+    start: Point,
+    at: Point,
+    lines: Vec<(Point, Point)>,
+}
+
+impl Outline {
+    fn px(&self, x: f32, y: f32) -> Point {
+        (x * self.scale, -y * self.scale)
+    }
+
+    fn line(&mut self, to: Point) {
+        self.lines.push((self.at, to));
+        self.at = to;
+    }
+
+    /// Flattens a curve given as a function of t in 0..=1.
+    fn curve(&mut self, reach: f32, point: impl Fn(f32) -> Point) {
+        let steps = (reach / 3.0).ceil().clamp(2.0, 24.0) as usize;
+        for i in 1..=steps {
+            self.line(point(i as f32 / steps as f32));
+        }
+    }
+}
+
+fn dist(a: Point, b: Point) -> f32 {
+    ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
+}
+
+impl ttf_parser::OutlineBuilder for Outline {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.at = self.px(x, y);
+        self.start = self.at;
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.line(self.px(x, y));
+    }
+
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        let (a, b, c) = (self.at, self.px(x1, y1), self.px(x, y));
+        self.curve(dist(a, b) + dist(b, c), |t| {
+            let (m, n, o) = ((1.0 - t) * (1.0 - t), 2.0 * t * (1.0 - t), t * t);
+            (m * a.0 + n * b.0 + o * c.0, m * a.1 + n * b.1 + o * c.1)
+        });
+    }
+
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        let (a, b, c, d) = (self.at, self.px(x1, y1), self.px(x2, y2), self.px(x, y));
+        self.curve(dist(a, b) + dist(b, c) + dist(c, d), |t| {
+            let s = 1.0 - t;
+            let (m, n, o, p) = (s * s * s, 3.0 * s * s * t, 3.0 * s * t * t, t * t * t);
+            (m * a.0 + n * b.0 + o * c.0 + p * d.0, m * a.1 + n * b.1 + o * c.1 + p * d.1)
+        });
+    }
+
+    fn close(&mut self) {
+        self.line(self.start);
+    }
+}
+
+/// Exact-area coverage rasterizer: every edge adds its signed area to an
+/// accumulation buffer; a running sum then yields per-pixel coverage.
+fn rasterize(lines: &[(Point, Point)], w: usize, h: usize) -> Vec<u8> {
+    let mut acc = vec![0.0f32; w * h + 2];
+    let mut add = |i: usize, v: f32| {
+        if let Some(cell) = acc.get_mut(i) {
+            *cell += v;
+        }
+    };
+    for &(a, b) in lines {
+        if a.1 == b.1 {
+            continue;
+        }
+        let (dir, p0, p1) = if a.1 < b.1 { (1.0, a, b) } else { (-1.0, b, a) };
+        let dxdy = (p1.0 - p0.0) / (p1.1 - p0.1);
+        let mut x = p0.0;
+        for y in p0.1.max(0.0) as usize..h.min(p1.1.ceil() as usize) {
+            let row = y * w;
+            let dy = ((y + 1) as f32).min(p1.1) - (y as f32).max(p0.1);
+            let xnext = x + dxdy * dy;
+            let d = dy * dir;
+            let (x0, x1) = if x < xnext { (x, xnext) } else { (xnext, x) };
+            let x0floor = x0.floor();
+            let x0i = x0floor.max(0.0) as usize;
+            let x1ceil = x1.ceil();
+            let x1i = x1ceil.max(0.0) as usize;
+            if x1i <= x0i + 1 {
+                let xmf = 0.5 * (x + xnext) - x0floor;
+                add(row + x0i, d - d * xmf);
+                add(row + x0i + 1, d * xmf);
+            } else {
+                let s = (x1 - x0).recip();
+                let x0f = x0 - x0floor;
+                let a0 = 0.5 * s * (1.0 - x0f) * (1.0 - x0f);
+                let x1f = x1 - x1ceil + 1.0;
+                let am = 0.5 * s * x1f * x1f;
+                add(row + x0i, d * a0);
+                if x1i == x0i + 2 {
+                    add(row + x0i + 1, d * (1.0 - a0 - am));
+                } else {
+                    let a1 = s * (1.5 - x0f);
+                    add(row + x0i + 1, d * (a1 - a0));
+                    for xi in x0i + 2..x1i - 1 {
+                        add(row + xi, d * s);
+                    }
+                    let a2 = a1 + (x1i - x0i - 3) as f32 * s;
+                    add(row + x1i - 1, d * (1.0 - a2 - am));
+                }
+                add(row + x1i, d * am);
+            }
+            x = xnext;
+        }
+    }
+    let mut sum = 0.0;
+    acc[..w * h]
+        .iter()
+        .map(|v| {
+            sum += v;
+            (sum.abs().min(1.0) * 255.0) as u8
+        })
+        .collect()
+}
+
+type Face = ttf_parser::Face<'static>;
+
+/// Anti-aliased text in one size, with glyphs rasterized once and cached.
+pub struct Text {
+    fonts: Vec<Face>,
+    loaded: Vec<String>,
+    /// Unicode blocks we already asked fontconfig about.
+    asked: HashSet<u32>,
+    px: f32,
+    cache: HashMap<char, Glyph>,
+    pub ascent: i32,
+    pub height: i32,
+}
+
+fn fc_match(pattern: &str) -> Option<String> {
+    let out = Command::new("fc-match").args(["-f", "%{file}", pattern]).output().ok()?;
+    let file = String::from_utf8(out.stdout).ok()?;
+    (!file.is_empty()).then_some(file)
+}
+
+fn load_font(path: &str) -> Option<Face> {
+    // Fonts stay loaded for the life of the program.
+    let data: &'static [u8] = Box::leak(std::fs::read(path).ok()?.into_boxed_slice());
+    let face = Face::parse(data, 0).ok()?;
+    // Reject fonts we cannot actually draw.
+    (make_glyph(&face, 'a', 16.0)?.w > 0).then_some(face)
+}
+
+fn make_glyph(face: &Face, ch: char, px: f32) -> Option<Glyph> {
+    let id = face.glyph_index(ch)?;
+    let scale = px / face.units_per_em() as f32;
+    let advance = face.glyph_hor_advance(id).unwrap_or(0) as f32 * scale;
+    let mut outline = Outline { scale, start: (0.0, 0.0), at: (0.0, 0.0), lines: Vec::new() };
+    face.outline_glyph(id, &mut outline);
+    if outline.lines.is_empty() {
+        return Some(Glyph { advance, left: 0, top: 0, w: 0, coverage: Vec::new() }); // e.g. a space
+    }
+    // Shift the outline into a bitmap that just contains it.
+    let points = || outline.lines.iter().flat_map(|&(a, b)| [a, b]);
+    let left = points().map(|p| p.0).fold(f32::MAX, f32::min).floor();
+    let top = points().map(|p| p.1).fold(f32::MAX, f32::min).floor();
+    let w = (points().map(|p| p.0).fold(f32::MIN, f32::max) - left).ceil() as usize + 1;
+    let h = (points().map(|p| p.1).fold(f32::MIN, f32::max) - top).ceil() as usize + 1;
+    let moved: Vec<_> =
+        outline.lines.iter().map(|&(a, b)| ((a.0 - left, a.1 - top), (b.0 - left, b.1 - top))).collect();
+    Some(Glyph { advance, left: left as i32, top: top as i32, w, coverage: rasterize(&moved, w, h.min(4096)) })
+}
+
+impl Text {
+    /// Loads the UI font: FF_GUI_FONT (a font file), else the system's
+    /// default sans-serif, else a few well-known locations.
+    pub fn load(px: f32) -> io::Result<Text> {
+        let mut candidates: Vec<String> = std::env::var("FF_GUI_FONT").into_iter().collect();
+        candidates.extend(fc_match("sans"));
+        candidates.extend(
+            [
+                "/usr/share/fonts/truetype/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
+            ]
+            .map(String::from),
+        );
+        let (path, face) = candidates
+            .into_iter()
+            .find_map(|p| load_font(&p).map(|f| (p, f)))
+            .ok_or_else(|| io::Error::other("no usable font found; set FF_GUI_FONT to a .ttf file"))?;
+        let scale = px / face.units_per_em() as f32;
+        let (ascent, descent) = (face.ascender() as f32 * scale, face.descender() as f32 * scale);
+        Ok(Text {
+            fonts: vec![face],
+            loaded: vec![path],
+            asked: HashSet::new(),
+            px,
+            cache: HashMap::new(),
+            ascent: ascent.ceil() as i32,
+            height: (ascent - descent).ceil() as i32,
+        })
+    }
+
+    fn glyph(&mut self, ch: char) -> &Glyph {
+        let ch = if ch.is_control() { '?' } else { ch };
+        if !self.cache.contains_key(&ch) {
+            let has = |f: &Face| f.glyph_index(ch).is_some();
+            let mut font = self.fonts.iter().position(has);
+            // Not in any loaded font: ask fontconfig once per Unicode block.
+            if font.is_none() && self.asked.insert(ch as u32 >> 7) {
+                if let Some(path) = fc_match(&format!(":charset={:x}", ch as u32)) {
+                    if !self.loaded.contains(&path) {
+                        if let Some(f) = load_font(&path) {
+                            font = has(&f).then_some(self.fonts.len());
+                            self.fonts.push(f);
+                        }
+                        self.loaded.push(path);
+                    }
+                }
+            }
+            // Unknown everywhere: the primary font's "missing" box.
+            let glyph = match font {
+                Some(i) => make_glyph(&self.fonts[i], ch, self.px),
+                None => make_glyph(&self.fonts[0], '\u{25a1}', self.px).or_else(|| make_glyph(&self.fonts[0], '?', self.px)),
+            };
+            let blank = Glyph { advance: self.px / 2.0, left: 0, top: 0, w: 0, coverage: Vec::new() };
+            self.cache.insert(ch, glyph.unwrap_or(blank));
+        }
+        &self.cache[&ch]
+    }
+
+    pub fn width(&mut self, s: &str) -> i32 {
+        s.chars().map(|ch| self.glyph(ch).advance).sum::<f32>().ceil() as i32
+    }
+
+    /// Byte index in `s` of the character boundary nearest to offset `x`.
+    pub fn index_at(&mut self, s: &str, x: i32) -> usize {
+        let mut pen = 0.0;
+        for (i, ch) in s.char_indices() {
+            let advance = self.glyph(ch).advance;
+            if (x as f32) < pen + advance / 2.0 {
+                return i;
+            }
+            pen += advance;
+        }
+        s.len()
+    }
+
+    /// Draws `s` with its top-left at (`x`, `top`), shortened with an
+    /// ellipsis if it is wider than `max_w`.
+    pub fn draw(&mut self, cv: &mut Canvas, x: i32, top: i32, s: &str, max_w: i32, color: u32) {
+        let too_wide = self.width(s) > max_w;
+        let ellipsis = if too_wide { self.glyph('…').advance } else { 0.0 };
+        let limit = (x + max_w) as f32;
+        let baseline = top + self.ascent;
+        let color = bgr(color);
+        let mut pen = x as f32;
+        let mut chars = s.chars();
+        loop {
+            let mut next = chars.next();
+            if let Some(ch) = next {
+                if too_wide && pen + self.glyph(ch).advance + ellipsis > limit {
+                    next = None;
+                }
+            }
+            let last = next.is_none();
+            if last && !too_wide {
+                break;
+            }
+            let g = self.glyph(next.unwrap_or('…'));
+            if pen + g.advance <= limit + 0.5 {
+                let (gx, gy) = (pen.round() as i32 + g.left, baseline + g.top);
+                for (i, &a) in g.coverage.iter().enumerate() {
+                    cv.blend(gx + (i % g.w) as i32, gy + (i / g.w) as i32, color, a as u32);
+                }
+            }
+            pen += g.advance;
+            if last {
+                break;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Icon {
+    Folder,
+    File,
+    Text,
+    Code,
+    Document,
+    Pdf,
+    Image,
+    Audio,
+    Video,
+    Archive,
+    Program,
+    Link,
+    /// The application icon: an eye.
+    App,
+}
+
+impl Icon {
+    /// Picks an icon from the entry type and file extension.
+    pub fn of(name: &[u8], is_dir: bool, is_symlink: bool) -> Icon {
+        if is_dir {
+            return Icon::Folder;
+        }
+        if is_symlink {
+            return Icon::Link;
+        }
+        let ext = match name.iter().rposition(|&b| b == b'.') {
+            Some(i) if i > 0 => name[i + 1..].to_ascii_lowercase(),
+            _ => return Icon::File,
+        };
+        match &ext[..] {
+            b"txt" | b"md" | b"log" | b"rst" | b"csv" | b"ini" | b"conf" | b"cfg" | b"toml" | b"yaml" | b"yml"
+            | b"json" | b"xml" | b"desktop" => Icon::Text,
+            b"rs" | b"c" | b"h" | b"cpp" | b"hpp" | b"cc" | b"py" | b"js" | b"ts" | b"jsx" | b"tsx" | b"go"
+            | b"java" | b"kt" | b"swift" | b"rb" | b"php" | b"sh" | b"bash" | b"zsh" | b"lua" | b"pl" | b"cs"
+            | b"html" | b"css" | b"sql" => Icon::Code,
+            b"doc" | b"docx" | b"odt" | b"rtf" | b"xls" | b"xlsx" | b"ods" | b"ppt" | b"pptx" | b"odp" | b"epub" => {
+                Icon::Document
+            }
+            b"pdf" => Icon::Pdf,
+            b"png" | b"jpg" | b"jpeg" | b"gif" | b"bmp" | b"svg" | b"webp" | b"ico" | b"tif" | b"tiff" | b"heic"
+            | b"avif" => Icon::Image,
+            b"mp3" | b"wav" | b"flac" | b"ogg" | b"m4a" | b"aac" | b"opus" => Icon::Audio,
+            b"mp4" | b"mkv" | b"avi" | b"mov" | b"webm" | b"wmv" | b"flv" | b"m4v" => Icon::Video,
+            b"zip" | b"tar" | b"gz" | b"xz" | b"bz2" | b"zst" | b"7z" | b"rar" | b"tgz" | b"rpm" | b"deb" | b"iso"
+            | b"jar" => Icon::Archive,
+            b"exe" | b"appimage" | b"bin" | b"run" | b"so" => Icon::Program,
+            _ => Icon::File,
+        }
+    }
+
+    /// Color of the icon at a point of the unit square, if it covers it.
+    fn sample(self, u: f32, v: f32) -> Option<u32> {
+        let rounded = |x0: f32, y0: f32, x1: f32, y1: f32, r: f32| {
+            let dx = (x0 + r - u).max(u - (x1 - r)).max(0.0);
+            let dy = (y0 + r - v).max(v - (y1 - r)).max(0.0);
+            u >= x0 && u <= x1 && v >= y0 && v <= y1 && dx * dx + dy * dy <= r * r
+        };
+        if self == Icon::App {
+            // An almond: the overlap of two circles, one centred below
+            // and one above the middle. `r` shrinks it for the outline.
+            let almond = |r: f32| {
+                let dx2 = (u - 0.5).powi(2);
+                dx2 + (v - 0.74).powi(2) <= r * r && dx2 + (v - 0.26).powi(2) <= r * r
+            };
+            if !almond(0.51) {
+                return None;
+            }
+            if !almond(0.455) {
+                return Some(0xf08a1c); // eyelid outline
+            }
+            let from = |cx: f32, cy: f32| ((u - cx).powi(2) + (v - cy).powi(2)).sqrt();
+            return Some(if from(0.555, 0.445) <= 0.035 {
+                0xffffff // glint
+            } else if from(0.5, 0.5) <= 0.085 {
+                0x2b2118 // pupil
+            } else if from(0.5, 0.5) <= 0.17 {
+                0xc96a12 // iris
+            } else {
+                0xfdfdfd
+            });
+        }
+        if self == Icon::Folder {
+            return if rounded(0.05, 0.27, 0.95, 0.87, 0.07) {
+                Some(if v < 0.37 { 0xe5ac2c } else { 0xf5c542 })
+            } else if rounded(0.05, 0.14, 0.47, 0.42, 0.07) {
+                Some(0xd3951c) // the tab, behind the body
+            } else {
+                None
+            };
+        }
+        // A page with a folded top-right corner; `inset` shrinks it to
+        // tell the outline from the inside.
+        let page = |inset: f32| {
+            u >= 0.18 + inset && u <= 0.82 - inset && v >= 0.06 + inset && v <= 0.94 - inset && u - v <= 0.52 - inset * 1.4
+        };
+        if !page(0.0) {
+            return None;
+        }
+        const EDGE: u32 = 0x7b838e;
+        if !page(0.045) {
+            return Some(EDGE);
+        }
+        if u > 0.58 && v < 0.30 {
+            return Some(if u < 0.625 || v > 0.255 { EDGE } else { 0xdde1e6 }); // the fold
+        }
+        let band = (0.52..=0.80).contains(&v);
+        let color = match self {
+            Icon::Text => {
+                let on_line = [0.44, 0.58, 0.72].iter().any(|c| (v - c).abs() < 0.035);
+                return Some(if on_line && (0.32..=0.68).contains(&u) { 0x9aa1aa } else { 0xffffff });
+            }
+            Icon::Code => 0x3b7dd8,
+            Icon::Document => 0x2f9e8f,
+            Icon::Pdf => 0xd93025,
+            Icon::Image => 0x3fa66b,
+            Icon::Audio => 0x9b59b6,
+            Icon::Video => 0xe2662f,
+            Icon::Archive => 0xb07d3a,
+            Icon::Program => 0x4a4f57,
+            Icon::Link => 0x9aa1aa,
+            _ => return Some(0xffffff),
+        };
+        Some(if band { color } else { 0xffffff })
+    }
+}
+
+impl Icon {
+    /// Renders the icon as `size` x `size` BGRA pixels.
+    pub fn render(self, size: usize) -> Vec<[u8; 4]> {
+        // 4x4 supersampling gives smooth edges.
+        const N: usize = 4;
+        let step = 1.0 / (size * N) as f32;
+        (0..size * size)
+            .map(|i| {
+                let (px, py) = (i % size, i / size);
+                let mut sum = [0u32; 4];
+                for s in 0..N * N {
+                    let u = ((px * N + s % N) as f32 + 0.5) * step;
+                    let v = ((py * N + s / N) as f32 + 0.5) * step;
+                    if let Some(c) = self.sample(u, v) {
+                        let [b, g, r] = bgr(c);
+                        sum = [sum[0] + b as u32, sum[1] + g as u32, sum[2] + r as u32, sum[3] + 1];
+                    }
+                }
+                let n = sum[3].max(1);
+                [(sum[0] / n) as u8, (sum[1] / n) as u8, (sum[2] / n) as u8, (sum[3] * 255 / (N * N) as u32) as u8]
+            })
+            .collect()
+    }
+}
+
+/// File icons drawn from shapes and cached as images at the UI size.
+pub struct Icons {
+    pub size: usize,
+    cache: HashMap<Icon, Vec<[u8; 4]>>,
+}
+
+impl Icons {
+    pub fn new(size: usize) -> Icons {
+        Icons { size, cache: HashMap::new() }
+    }
+
+    pub fn draw(&mut self, cv: &mut Canvas, x: i32, y: i32, icon: Icon) {
+        let size = self.size;
+        let image = self.cache.entry(icon).or_insert_with(|| icon.render(size));
+        for (i, p) in image.iter().enumerate() {
+            cv.blend(x + (i % size) as i32, y + (i / size) as i32, [p[0], p[1], p[2]], p[3] as u32);
+        }
+    }
+}

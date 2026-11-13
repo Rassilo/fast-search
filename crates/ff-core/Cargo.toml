@@ -1,0 +1,10 @@
+[package]
+name = "ff-core"
+description = "Instant file-name search: index, query engine and C API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+# rlib for Rust users, staticlib (libff_core.a + include/ff.h) for C users.
+crate-type = ["rlib", "staticlib"]

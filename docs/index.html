@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fast search — instant file search for Linux</title>
+<meta name="description" content="Fast search (ff): find any file on your Linux disk by name in milliseconds. A command, a window and a library, each under 1 MB.">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #fbfaf8; --surface: #ffffff; --ink: #1c1b19; --muted: #625f58;
+    --line: #e4e0d8; --accent: #c2600c; --accent-ink: #ffffff; --code-bg: #f1eee8;
+    --shadow: 0 18px 50px rgba(40, 30, 10, .16);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151412; --surface: #1e1d1a; --ink: #f0ede6; --muted: #a8a399;
+      --line: #34322d; --accent: #f08a1c; --accent-ink: #1a1206; --code-bg: #25231f;
+      --shadow: 0 18px 50px rgba(0, 0, 0, .5);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 17px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 20px; }
+  header.top { display: flex; align-items: center; gap: 10px; padding: 22px 0; }
+  header.top img { width: 30px; height: 30px; }
+  header.top strong { font-size: 18px; letter-spacing: -.01em; }
+  header.top nav { margin-left: auto; display: flex; gap: 20px; font-size: 15px; }
+  header.top nav a { color: var(--muted); text-decoration: none; }
+  header.top nav a:hover { color: var(--ink); }
+
+  .hero { padding: 48px 0 28px; max-width: 760px; }
+  h1 { font-size: clamp(34px, 6vw, 56px); line-height: 1.05; letter-spacing: -.03em; margin: 0 0 18px; text-wrap: balance; }
+  .hero p { font-size: 20px; color: var(--muted); margin: 0 0 26px; max-width: 60ch; }
+  .actions { display: flex; flex-wrap: wrap; gap: 12px; }
+  .btn {
+    display: inline-block; padding: 11px 20px; border-radius: 8px; text-decoration: none;
+    font-weight: 600; border: 1px solid var(--line); color: var(--ink); background: var(--surface);
+  }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+  .window { margin: 34px 0 10px; border-radius: 12px; overflow: hidden; box-shadow: var(--shadow); border: 1px solid var(--line); background: #2b2b2b; }
+  .window .bar { display: flex; align-items: center; justify-content: center; position: relative; height: 38px; color: #e8e8e8; font-size: 14px; font-weight: 600; }
+  .window .bar i { position: absolute; right: 14px; width: 12px; height: 12px; border-radius: 50%; background: #5a5a5a; box-shadow: -22px 0 0 #5a5a5a, -44px 0 0 #5a5a5a; }
+  .window img { display: block; width: 100%; height: auto; }
+  .caption { color: var(--muted); font-size: 14px; text-align: center; margin: 0 0 40px; }
+
+  .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin: 10px 0 56px; }
+  .facts div { background: var(--surface); padding: 20px; }
+  .facts b { display: block; font-size: 30px; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  .facts span { color: var(--muted); font-size: 14px; }
+
+  h2 { font-size: 28px; letter-spacing: -.02em; margin: 56px 0 8px; }
+  .lead { color: var(--muted); margin: 0 0 22px; max-width: 65ch; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+  .card h3 { margin: 0 0 6px; font-size: 18px; }
+  .card h3 code { font-size: 15px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15.5px; }
+  .downloads .card p { margin: 10px 0 14px; }
+  .downloads .card pre { margin: 0; font-size: 13px; padding: 12px 14px; }
+  h3 { font-size: 19px; margin: 30px 0 10px; }
+  .card h3 { margin-top: 0; }
+
+  code, pre { font-family: ui-monospace, "SF Mono", "DejaVu Sans Mono", Menlo, monospace; }
+  code { background: var(--code-bg); padding: 2px 6px; border-radius: 5px; font-size: .9em; }
+  pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; overflow-x: auto; font-size: 14.5px; line-height: 1.55; margin: 0 0 18px; }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  pre .c { color: var(--muted); }
+
+  .table-scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 15.5px; }
+  th, td { text-align: left; padding: 9px 14px 9px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 14px; }
+
+  .flow { display: grid; grid-template-columns: 1fr auto 1fr; gap: 14px; align-items: center; margin: 8px 0 22px; }
+  .flow .box { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+  .flow .box small { color: var(--accent); font-weight: 700; text-transform: uppercase; letter-spacing: .06em; font-size: 12px; }
+  .flow .box h3 { margin: 2px 0 6px; font-size: 18px; }
+  .flow .box p { margin: 0; color: var(--muted); font-size: 15px; }
+  .flow .arrow { text-align: center; color: var(--muted); font-size: 13px; }
+  .flow .arrow b { display: block; font-size: 26px; color: var(--accent); line-height: 1; }
+  @media (max-width: 720px) { .flow { grid-template-columns: 1fr; } .flow .arrow b { transform: rotate(90deg); } }
+
+  .note { border-left: 3px solid var(--accent); background: var(--surface); padding: 14px 18px; border-radius: 0 10px 10px 0; color: var(--muted); font-size: 15.5px; margin: 0 0 18px; }
+  .note strong { color: var(--ink); }
+  footer { margin-top: 72px; padding: 26px 0 40px; border-top: 1px solid var(--line); color: var(--muted); font-size: 14.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <img src="icon.svg" alt="">
+  <strong>Fast search</strong>
+  <nav>
+    <a href="#use">Use</a>
+    <a href="#live">Live updates</a>
+    <a href="#download">Download</a>
+    <a href="https://github.com/khunder/fast-search">GitHub</a>
+  </nav>
+</header>
+
+<section class="hero">
+  <h1>Find any file on your disk the moment you type.</h1>
+  <p>Fast search (<code>ff</code>) indexes every file name on your Linux machine and searches them in milliseconds. It comes as a command, a window and a library, each a single static binary under 1&nbsp;MB.</p>
+  <div class="actions">
+    <a class="btn primary" href="#download">Download</a>
+    <a class="btn" href="https://github.com/khunder/fast-search">Source on GitHub</a>
+  </div>
+</section>
+
+<div class="window">
+  <img src="screenshot.png" width="2000" height="1280" alt="The Fast search window: a title bar with an eye icon, a menu bar (File, Edit, View, Options, Help), a search box containing 'usr/share/doc readme', a list of matching files with name, path, size and date columns, and a right-click menu offering Open, Open in text editor, Open folder, Copy, Copy full path, Copy name and Properties.">
+</div>
+<p class="caption">Searching the whole disk for <code>usr/share/doc readme</code>, with the actions menu open.</p>
+
+<div class="facts">
+  <div><b>0.4 s</b><span>to index 270,000 files and folders</span></div>
+  <div><b>20 ms</b><span>per search, including loading the index</span></div>
+  <div><b>&lt; 1 MB</b><span>per binary, fully static</span></div>
+  <div><b>1</b><span>third-party library, for reading fonts</span></div>
+</div>
+<p class="caption" style="text-align:left;margin-top:-44px">Measured on the development machine (20 cores, NVMe disk).</p>
+
+<h2 id="use">Three ways to use it</h2>
+<p class="lead">All three share one engine and one index, so results are identical everywhere.</p>
+<div class="cards">
+  <div class="card"><h3>Command <code>ff</code></h3><p>Search from the terminal, pipe results into other tools, open a file, show it in the file manager or print its properties.</p></div>
+  <div class="card"><h3>Window <code>ff-gui</code></h3><p>Search as you type, with file icons, sortable columns, a right-click menu and a properties panel. Follows your desktop scale.</p></div>
+  <div class="card"><h3>Library <code>ff-core</code></h3><p>A Rust crate and a static C library with a small header, to embed the same search in your own program.</p></div>
+</div>
+
+<h2>Search syntax</h2>
+<p class="lead">Terms are separated by spaces and must all match. Matching ignores case unless you type an uppercase letter.</p>
+<div class="table-scroll">
+<table>
+  <tr><th>You type</th><th>You get</th></tr>
+  <tr><td><code>report</code></td><td>names containing "report"</td></tr>
+  <tr><td><code>*.pdf</code></td><td>names matching the wildcard (<code>*</code> any run, <code>?</code> one character)</td></tr>
+  <tr><td><code>src/main</code></td><td>a term with <code>/</code> is matched against the full path</td></tr>
+  <tr><td><code>!draft</code></td><td>entries that do not match "draft"</td></tr>
+  <tr><td><code>report *.pdf !draft</code></td><td>PDF files with "report" in the name, excluding drafts</td></tr>
+</table>
+</div>
+
+<h2>On the command line</h2>
+<pre><code>ff index                          <span class="c"># scan the disk once</span>
+ff report '*.pdf'                 <span class="c"># search</span>
+ff -l -s size -r -n 10 '*.iso'    <span class="c"># ten largest ISOs, with size and date</span>
+ff -o notes.txt                   <span class="c"># open the first result</span>
+ff --open-folder notes.txt        <span class="c"># show it in the file manager</span>
+ff -p notes.txt                   <span class="c"># print its properties</span></code></pre>
+
+<h2 id="live">Live updates, without giving the window root</h2>
+<p class="lead">On its own the index is a snapshot. An optional daemon keeps it current, so a window left open for days always shows the disk as it is.</p>
+<div class="flow">
+  <div class="box"><small>Runs as root</small><h3><code>ffd</code> daemon</h3><p>Scans once, then lets the kernel (fanotify) report every create, delete, rename and finished write. It checks the disk for what changed and patches the index.</p></div>
+  <div class="arrow"><b>→</b>publishes<br><code>/run/ff/index.db</code></div>
+  <div class="box"><small>Runs as you</small><h3><code>ff</code> and <code>ff-gui</code></h3><p>Read the published index. They never talk to the daemon and never need root. The window reloads within about three seconds of a change.</p></div>
+</div>
+<p class="note"><strong>Privacy.</strong> The daemon sees every file. Everyone in the group you allow to read the index can search the names of all files on the system, including files in folders they cannot open. Only names, sizes and dates are exposed, never contents.</p>
+<p class="note"><strong>Status.</strong> The daemon is new and supports x86-64 only. It has been run on btrfs with subvolumes (the openSUSE layout), where it watches the device through a private mount of its top level.</p>
+
+<h2 id="download">Download</h2>
+<p class="lead">Packages for 64-bit Intel/AMD Linux, built from the latest release. Each contains the <code>ff</code> command, the Fast search window and the <code>ffd</code> daemon; nothing else needs installing.</p>
+<div class="cards downloads">
+  <div class="card">
+    <h3>Debian, Ubuntu, Mint</h3>
+    <p><a class="btn primary" href="https://github.com/khunder/fast-search/releases/latest/download/fast-search-amd64.deb">Download .deb</a></p>
+    <pre><code>sudo apt install ./fast-search-amd64.deb</code></pre>
+  </div>
+  <div class="card">
+    <h3>Fedora, openSUSE, RHEL</h3>
+    <p><a class="btn primary" href="https://github.com/khunder/fast-search/releases/latest/download/fast-search-x86_64.rpm">Download .rpm</a></p>
+    <pre><code>sudo dnf install ./fast-search-x86_64.rpm
+<span class="c"># openSUSE:</span>
+sudo zypper install --allow-unsigned-rpm ./fast-search-x86_64.rpm</code></pre>
+  </div>
+  <div class="card">
+    <h3>Any distribution</h3>
+    <p><a class="btn primary" href="https://github.com/khunder/fast-search/releases/latest/download/fast-search-x86_64.AppImage">Download AppImage</a></p>
+    <pre><code>chmod +x fast-search-x86_64.AppImage
+./fast-search-x86_64.AppImage         <span class="c"># the window</span>
+./fast-search-x86_64.AppImage ff foo  <span class="c"># the command</span></code></pre>
+  </div>
+</div>
+<p class="lead" style="margin-top:18px">Prefer plain files? The <a href="https://github.com/khunder/fast-search/releases/latest/download/fast-search-x86_64.tar.gz">tar.gz</a> holds just the three binaries. All versions are on the <a href="https://github.com/khunder/fast-search/releases">releases page</a>. The packages are not signed.</p>
+
+<h3>After installing</h3>
+<pre><code>ff index        <span class="c"># scan the disk once</span>
+ff-gui          <span class="c"># or start "Fast search" from the applications menu</span></code></pre>
+<p class="lead">For always-current results, switch on <b>Options → Live updates service</b> in the window; it asks for your password and installs the daemon.</p>
+
+<h2 id="install">Build from source</h2>
+<p class="lead">You need Rust. No C compiler is needed.</p>
+<pre><code>git clone https://github.com/khunder/fast-search
+cd fast-search
+rustup target add x86_64-unknown-linux-musl
+cargo build --release
+
+<span class="c"># the binaries: ff, ff-gui, ffd</span>
+ls target/x86_64-unknown-linux-musl/release/
+
+<span class="c"># optional: build the packages yourself</span>
+packaging/build-packages.sh</code></pre>
+
+<h2>Good to know</h2>
+<div class="cards">
+  <div class="card"><h3>Linux only</h3><p>The window needs an X server; XWayland on a Wayland desktop works.</p></div>
+  <div class="card"><h3>Names, not contents</h3><p>It finds files by name and path. It does not search inside files.</p></div>
+  <div class="card"><h3>Times in UTC</h3><p>Dates are shown in UTC for now, and complex scripts such as Arabic are drawn unshaped.</p></div>
+</div>
+
+<footer>
+  Fast search is open source under the <a href="https://github.com/khunder/fast-search/blob/master/LICENSE">MIT license</a>.
+  Read the <a href="https://github.com/khunder/fast-search#readme">full documentation</a> on GitHub.
+</footer>
+
+</div>
+</body>
+</html>
