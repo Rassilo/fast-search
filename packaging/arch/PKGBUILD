@@ -1,0 +1,47 @@
+# Arch Linux package for Fast search.
+#
+#   cd packaging/arch && makepkg -si
+#
+# It builds the tagged release from GitHub. The binaries are fully static
+# (musl), so the package has no runtime dependencies; the optional ones
+# below only enable individual actions.
+
+pkgname=fast-search
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Instant file search: the ff command, the Fast search window and the ffd live-update daemon"
+arch=('x86_64')
+url="https://github.com/khunder/fast-search"
+license=('MIT')
+# rust-musl provides the x86_64-unknown-linux-musl target. The project
+# links with rust-lld, which ships with the rust package, so no C
+# toolchain is needed.
+makedepends=('rust' 'rust-musl')
+optdepends=(
+  'xdg-utils: open files with their default application'
+  'glib2: move to trash, open in text editor, show in file manager'
+  'polkit: install the live updates service from the window'
+  'xorg-xwayland: run the window on a Wayland desktop'
+)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$pkgname-$pkgver"
+  cargo build --release --locked
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  cargo test --release --locked
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  local bin=target/x86_64-unknown-linux-musl/release
+  install -Dm755 "$bin/ff" "$bin/ff-gui" "$bin/ffd" -t "$pkgdir/usr/bin"
+  install -Dm644 packaging/ff-gui.desktop -t "$pkgdir/usr/share/applications"
+  install -Dm644 docs/icon.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/ff-gui.svg"
+  install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname"
+  install -Dm644 README.md -t "$pkgdir/usr/share/doc/$pkgname"
+}

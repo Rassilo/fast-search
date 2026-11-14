@@ -40,20 +40,8 @@ done
 install -D -m 644 docs/icon.svg "$root/usr/share/icons/hicolor/scalable/apps/ff-gui.svg"
 install -D -m 644 README.md "$root/usr/share/doc/fast-search/README.md"
 install -D -m 644 LICENSE "$root/usr/share/doc/fast-search/LICENSE"
-mkdir -p "$root/usr/share/applications"
 # The file name must stay ff-gui.desktop: desktops match it to the window.
-cat > "$root/usr/share/applications/ff-gui.desktop" <<'EOF'
-[Desktop Entry]
-Type=Application
-Name=Fast search
-Comment=Find files instantly by name
-Exec=ff-gui
-Icon=ff-gui
-Terminal=false
-Categories=Utility;FileTools;
-StartupWMClass=ff-gui
-EOF
-chmod 644 "$root/usr/share/applications/ff-gui.desktop"
+install -D -m 644 packaging/ff-gui.desktop "$root/usr/share/applications/ff-gui.desktop"
 
 # ---- tar.gz -------------------------------------------------------------------
 mkdir "$stage/fast-search-$version"

@@ -14,15 +14,19 @@
 # Filesystems: tmpfs ext4 xfs btrfs btrfs-subvol f2fs vfat exfat
 # (btrfs-subvol mounts a subvolume instead of the top level, the layout
 # openSUSE and others use, which needs ffd's top-level fallback.)
+#
+# Two more cases run with the full set, or by name:
+#   hotplug   a drive mounted and unmounted while ffd runs
+#   raw       an unmounted ext4 drive read directly (ffd --device)
 set -u
 PATH=/usr/sbin:/sbin:/usr/bin:/bin:$PATH
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 bin="$here/../target/x86_64-unknown-linux-musl/release"
-all="tmpfs ext4 xfs btrfs btrfs-subvol f2fs vfat exfat"
+all="tmpfs ext4 xfs btrfs btrfs-subvol f2fs vfat exfat hotplug raw"
 
 case "${1:-}" in
-    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 if [ ! -x "$bin/ffd" ] || [ ! -x "$bin/ff" ]; then
     echo "filesystems: build first with 'cargo build --release'" >&2
@@ -186,9 +190,84 @@ run_case() {
     summary="$summary$(printf '\n  %-14s %d passed, %d failed' "$name" "$case_pass" "$case_fail")"
 }
 
+# Starts ffd on folder $2 with extra arguments, as case $1; sets $db.
+start_daemon() {
+    name=$1; root=$2; shift 2
+    db="$work/out-$name/index.db"
+    case_pass=0
+    case_fail=0
+    printf '%s:\n' "$name"
+    "$bin/ffd" --output "$db" --interval 0.3 "$@" "$root" > "$work/$name.log" 2>&1 &
+    ffd_pid=$!
+}
+
+finish_case() {
+    if [ "$case_fail" -ne 0 ]; then
+        echo "    --- daemon log ---"
+        sed 's/^/    /' "$work/$name.log"
+    fi
+    stop_daemon
+    summary="$summary$(printf '\n  %-14s %d passed, %d failed' "$name" "$case_pass" "$case_fail")"
+}
+
+# A drive that is mounted, then unmounted, while the daemon runs.
+run_hotplug() {
+    have mkfs.ext4 || { summary="$summary$(printf '\n  %-14s skipped: mkfs.ext4 is not installed' hotplug)"; return; }
+    hot="$work/hot"
+    mnt="$work/mnt-hotplug"   # under mnt-* so cleanup unmounts it
+    mkdir -p "$hot" "$mnt"
+    echo x > "$hot/ffprobe_before.txt"
+    truncate -s 64M "$work/hot.img"
+    mkfs.ext4 -q -F "$work/hot.img"
+    # Put a file on the drive before it is ever seen by the daemon.
+    mount -o loop "$work/hot.img" "$mnt" && echo x > "$mnt/ffprobe_ondrive.txt" && umount "$mnt"
+    rmdir "$mnt"; mnt="$hot/drive"; mkdir "$mnt"
+
+    start_daemon hotplug "$hot"
+    if check "daemon starts and publishes an index" test -s "$db"; then
+        check "file outside the drive is indexed" has 1 ffprobe_before "$hot/"
+        check "drive content is absent while unmounted" has 0 ffprobe_ondrive "$hot/"
+        mount -o loop "$work/hot.img" "$mnt"
+        check "mounting the drive brings its files in" has 1 ffprobe_ondrive "$hot/"
+        echo x > "$mnt/ffprobe_live.txt"
+        check "a new file on the mounted drive is followed" has 1 ffprobe_live "$hot/"
+        umount "$mnt"
+        check "unmounting the drive removes its files" has 0 ffprobe_ondrive "$hot/"
+        check "the rest of the index is still there" has 1 ffprobe_before "$hot/"
+    fi
+    umount "$mnt" 2>/dev/null
+    finish_case
+}
+
+# A drive that is not mounted, read directly from its device.
+run_raw() {
+    if ! have mkfs.ext4 || ! have losetup; then
+        summary="$summary$(printf '\n  %-14s skipped: needs mkfs.ext4 and losetup' raw)"; return
+    fi
+    tree="$work/rawtree"
+    mkdir -p "$tree/folder/deeper" "$work/rawroot"
+    echo x > "$tree/folder/deeper/ffprobe_rawfile.txt"
+    echo x > "$work/rawroot/ffprobe_walked.txt"
+    mkfs.ext4 -q -F -d "$tree" "$work/raw.img" 32M
+    loop=$(losetup --find --show "$work/raw.img") || { summary="$summary$(printf '\n  %-14s skipped: no loop device' raw)"; return; }
+
+    start_daemon raw "$work/rawroot" --device "$loop"
+    if check "daemon starts and publishes an index" test -s "$db"; then
+        check "the walked folder is indexed" has 1 ffprobe_walked "$work/rawroot/"
+        check "the unmounted drive's file is indexed under its device" has 1 ffprobe_rawfile "$loop/folder/deeper/"
+        check "its folders are too" has 1 -d deeper "$loop/"
+    fi
+    finish_case
+    losetup -d "$loop" 2>/dev/null
+}
+
 [ $# -eq 0 ] && set -- $all
 for fs in "$@"; do
-    run_case "$fs"
+    case "$fs" in
+        hotplug) run_hotplug ;;
+        raw) run_raw ;;
+        *) run_case "$fs" ;;
+    esac
 done
 
 printf '\nSummary:%s\n\n' "$summary"

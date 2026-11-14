@@ -26,9 +26,11 @@ Website: <https://khunder.github.io/fast-search/>
 | `crates/ff-gui` | `ff-gui` | "Fast search" window, drawn over the raw X11 protocol |
 | `crates/ff-daemon` | `ffd` | Root daemon that keeps the index current with fanotify |
 
-The only third-party code is [`ttf-parser`](https://crates.io/crates/ttf-parser)
-(reads font files for the window). Everything else uses the Rust standard
-library.
+Third-party code is limited to two small pure-Rust libraries:
+[`ttf-parser`](https://crates.io/crates/ttf-parser) (reads font files for
+the window) and [`regex-lite`](https://crates.io/crates/regex-lite)
+(regular expressions). Everything else uses the Rust standard library, and
+each binary stays under 1 MB.
 
 ## Install
 
@@ -40,6 +42,7 @@ Packages for 64-bit Intel/AMD Linux are attached to every
 | Debian, Ubuntu, Mint | [`fast-search-amd64.deb`](https://github.com/khunder/fast-search/releases/latest/download/fast-search-amd64.deb) | `sudo apt install ./fast-search-amd64.deb` |
 | Fedora, RHEL | [`fast-search-x86_64.rpm`](https://github.com/khunder/fast-search/releases/latest/download/fast-search-x86_64.rpm) | `sudo dnf install ./fast-search-x86_64.rpm` |
 | openSUSE | same `.rpm` | `sudo zypper install --allow-unsigned-rpm ./fast-search-x86_64.rpm` |
+| Arch Linux | [`packaging/arch/PKGBUILD`](packaging/arch/PKGBUILD) | `cd packaging/arch && makepkg -si` |
 | Any distribution | [`fast-search-x86_64.AppImage`](https://github.com/khunder/fast-search/releases/latest/download/fast-search-x86_64.AppImage) | `chmod +x` it and run it |
 | Plain binaries | [`fast-search-x86_64.tar.gz`](https://github.com/khunder/fast-search/releases/latest/download/fast-search-x86_64.tar.gz) | unpack anywhere |
 
@@ -84,14 +87,39 @@ ff stats                 # what is indexed
 | `'*.pdf'` | wildcard on the whole name (`*` any run, `?` one character) |
 | `src/main` | contains `/`: matched against the full path |
 | `'!foo'` | must not match |
+| `"my file"` | quotes keep a space inside a term |
 
-Matching is case-insensitive unless a term contains an uppercase letter
-(`-c` forces case-sensitive, `-i` case-insensitive). Case folding covers
-ASCII letters only. Run `ff --help` for all options.
+Every term must match. Matching ignores case unless a term has an
+uppercase letter (`-c` forces case-sensitive, `-i` case-insensitive), for
+all Unicode letters. Two switches change how terms are read:
 
-By default `/proc`, `/sys`, `/dev`, `/run` and `/.snapshots` are skipped.
-Running `ff index` again with no arguments reuses the previous roots and
-excludes.
+| Switch | CLI | Window | Effect |
+|---|---|---|---|
+| Regular expressions | `-R` | Ctrl+R | terms are regexes: `'^IMG_\d+\.jpe?g$'` |
+| Whole words | `-w` | Ctrl+B | `port` finds "port 80" but not "report" |
+
+### Filters
+
+Filters narrow the results and mix freely with terms.
+
+| Filter | Meaning |
+|---|---|
+| `ext:pdf` | by extension; several: `ext:jpg;png;gif`; compound: `ext:tar.gz` |
+| `size:>100M` | larger than 100 MB; also `>=`, `<`, `<=`, exact `size:0` |
+| `size:10M..1G` | a size range (`K`, `M`, `G`, `T`; 1K = 1024 bytes) |
+| `modified:today` | changed since midnight; also `yesterday` |
+| `modified:3h`, `modified:7d` | in the last 3 hours, the last 7 days |
+| `modified:2026-10-24` | on that day |
+| `modified:2026-01-01..2026-06-30` | between two dates; `2026-01-01..` since, `..2026-06-30` before |
+
+`dm:` is short for `modified:`. Dates and times are in your local time
+zone. Example: `ff invoice ext:pdf 'size:>1M' dm:30d`.
+
+By default `/proc`, `/sys`, `/dev`, `/run` and `/.snapshots` are skipped,
+and so is the content of trash folders. Leave out more with
+`ff index -x /some/folder` (repeatable) and `ff index --no-hidden` (names
+starting with a dot), or in the window under **Options → Exclude**. Running `ff index` again with no
+arguments reuses the previous roots and excludes.
 
 ## Window: `ff-gui`
 
@@ -112,13 +140,15 @@ applications menu.
 | Drag results into another program | press and drag: moves them (hold Ctrl to copy) |
 | Select several results | Shift+arrows, Shift+click, Ctrl+click, Ctrl+Shift+A |
 | Move to trash / delete permanently (both ask first) | Del / Shift+Del |
-| Preferences | Options → Preferences... |
+| Options (all settings: theme, search, results, view, drives, excludes) | Ctrl+P, or Options → Options... |
 | Actions menu (also: copy name) | right-click or the Menu key |
 | Menu bar | File, Edit, View, Options, Help |
 | Zoom | Ctrl++, Ctrl+-, Ctrl+0 |
 | Edit the search text | arrows, Home, End, Shift to select, Ctrl+A, Ctrl+X, Ctrl+V |
 | All / files / folders | F2 |
 | Case mode | F3 |
+| Help: search syntax, filters and shortcuts with examples | F1 |
+| Regular expressions / whole words | Ctrl+R / Ctrl+B |
 | Rebuild the index | F5 |
 | Sort | click a column header; again to reverse |
 | Clear, then quit | Esc |
@@ -126,7 +156,8 @@ applications menu.
 The window reloads the index by itself whenever the index file changes,
 so results follow `ff index` runs and the daemon.
 
-It follows the desktop scale (`Xft.dpi`). Override with `FF_GUI_SCALE=1.5`
+It has a light and a dark theme and follows the desktop's preference
+unless you choose one under **Options → Interface**. It follows the desktop scale (`Xft.dpi`). Override with `FF_GUI_SCALE=1.5`
 and choose a font file with `FF_GUI_FONT=/path/to/font.ttf`.
 
 ## Live updates: the `ffd` daemon
@@ -154,6 +185,24 @@ Without the daemon, the index is a snapshot: it is as fresh as your last
   allowed to read it, and fall back to `~/.cache/ff/index.db` otherwise.
 - Changes are batched; they reach an open window within about three
   seconds (`--interval` sets the publishing period, default 2 s).
+
+### Drives
+
+The daemon indexes every mounted drive and follows drives being mounted,
+unmounted, plugged in and removed. Per-drive choices are made in the
+window under **Options → Options... → Drives** (or with `ffd --configure`), and
+stored in `/etc/ffd.conf`:
+
+- **Index this drive** off: a mounted drive is left out.
+- **Follow changes as they happen** off: indexed, but not watched.
+- **Unmounted ext2/3/4 and NTFS drives** can be indexed too. The daemon
+  reads their file tables directly from the device, without mounting
+  them. Their files appear under the device name, such as
+  `/dev/sdb1/Photos/img.jpg`; they can be found but not opened until the
+  drive is mounted.
+
+The same direct reading is available from the command line for a device
+or a disk image: `sudo ff index --device /dev/sdb1`.
 
 ### Install
 
@@ -239,16 +288,20 @@ cargo test                    # unit tests, no root needed
 sudo tests/filesystems.sh     # the daemon on real filesystems
 ```
 
-`cargo test` covers the query engine, the index file format, the C API,
-live index patching, and the daemon's decoding of kernel events and of the
-mount table.
+`cargo test` covers the query engine (terms, regular expressions, filters,
+Unicode case), time zones, the index file format, the C API, live index
+patching, deleting, the direct ext2/ext4 and NTFS readers (against disk
+images it creates when `mkfs.ext4`, `mkfs.ntfs` and `ntfscp` are
+installed), and the daemon's decoding of kernel events, of the mount table
+and of drive settings.
 
 `tests/filesystems.sh` needs root. For each filesystem it can build on your
 machine (tmpfs, ext4, xfs, btrfs, a btrfs subvolume, f2fs, vfat, exfat) it
 creates a small disk image, starts a private `ffd` on it, then creates,
 renames, rewrites, moves and deletes files and checks the index follows.
-It works in a temporary folder under `/var/tmp` and leaves the system's
-`ffd` service alone. Name filesystems to test only those:
+It also mounts and unmounts a drive under a running daemon (`hotplug`) and
+indexes an unmounted drive directly (`raw`). It works in a temporary folder
+under `/var/tmp` and leaves the system's `ffd` service alone. Name filesystems to test only those:
 `sudo tests/filesystems.sh ext4 btrfs-subvol`.
 
 ## How it works
@@ -267,12 +320,14 @@ It works in a temporary folder under `/var/tmp` and leaves the system's
 ## Limitations
 
 - Linux only; the window needs an X server (XWayland is fine).
-- Times are shown in UTC.
 - No complex text shaping: Arabic and similar scripts are drawn as
   unconnected letters, left to right.
 - File icons are built in and chosen by extension, not taken from the
   desktop theme.
 - Without the daemon, changes are only picked up by `ff index` or F5.
+- Files on a drive read directly (not mounted) can be found, not opened.
+- Regular expressions use a compact engine: `\d`, `\w` and `\s` are
+  ASCII-only.
 
 ## License
 

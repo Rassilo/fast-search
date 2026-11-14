@@ -13,6 +13,42 @@ pub struct Canvas {
     pub clip: (i32, i32),
 }
 
+static DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Switches all drawing between the light and the dark palette.
+pub fn set_dark(dark: bool) {
+    DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// White that stays white in both palettes: text on a coloured fill.
+pub const ON_ACCENT: u32 = 0xff_fffe;
+
+/// The colour to really draw for a colour of the light palette. In the
+/// dark palette greys are flipped (white paper becomes near-black, dark
+/// ink becomes light), pale tints become deep ones of the same hue, and
+/// strong colours such as the selection blue stay as they are.
+pub fn tone(color: u32) -> u32 {
+    if color == ON_ACCENT {
+        return 0xff_ffff;
+    }
+    if !DARK.load(std::sync::atomic::Ordering::Relaxed) {
+        return color;
+    }
+    let [b, g, r] = bgr(color).map(|c| c as u32);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    if max - min < 24 {
+        // A grey: mirror its brightness into the range 0x1c..0xec.
+        let flipped = 0x1c + (255 - (r + g + b) / 3) * (0xec - 0x1c) / 255;
+        flipped << 16 | flipped << 8 | flipped
+    } else if min > 0xc0 {
+        // A pale tint: keep what makes it a tint, on a dark base.
+        let deep = |c: u32| (0x26 + (c - min) * 3 / 2).min(0xff);
+        deep(r) << 16 | deep(g) << 8 | deep(b)
+    } else {
+        color
+    }
+}
+
 fn bgr(color: u32) -> [u8; 3] {
     [color as u8, (color >> 8) as u8, (color >> 16) as u8]
 }
@@ -34,7 +70,7 @@ impl Canvas {
         let (x0, x1) = (clamp(x.max(self.clip.0), self.w), clamp(x.saturating_add(w).min(self.clip.1), self.w));
         let x1 = x1.max(x0);
         let (y0, y1) = (clamp(y, self.h), clamp(y.saturating_add(h), self.h));
-        let [b, g, r] = bgr(color);
+        let [b, g, r] = bgr(tone(color));
         for row in y0..y1 {
             let start = row * self.w * 4;
             for p in self.px[start + x0 * 4..start + x1 * 4].chunks_exact_mut(4) {
@@ -336,7 +372,7 @@ impl Text {
         let ellipsis = if too_wide { self.glyph('…').advance } else { 0.0 };
         let limit = (x + max_w) as f32;
         let baseline = top + self.ascent;
-        let color = bgr(color);
+        let color = bgr(tone(color));
         let mut pen = x as f32;
         let mut chars = s.chars();
         loop {

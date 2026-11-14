@@ -12,9 +12,9 @@ use std::process::ExitCode;
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime};
 
-use canvas::{Canvas, Icon, Icons, Text};
+use canvas::{Canvas, Icon, Icons, ON_ACCENT, Text};
 use ff_core::{BuildOptions, CaseMode, Index, Kind, Query, SearchOptions, Sort, desktop, group_digits};
-use dialog::{Dialog, Row};
+use dialog::{Dialog, NavItem, Row};
 use settings::Config;
 use x11::P::*;
 use x11::*;
@@ -48,9 +48,12 @@ KEYS:
                      (hold Ctrl to copy); also editors, upload boxes...
   Menu / right-click actions menu
   menu bar           File, Edit, View, Options and Help at the top
+  Ctrl+P             options
   Ctrl + / - / 0     zoom in / out / reset
+  F1                 help: search syntax, filters and shortcuts with examples
   F2                 show all / files only / folders only
   F3                 case: smart / sensitive / insensitive
+  Ctrl+R, Ctrl+B     regular expressions / whole words only
   F5                 rebuild the index (not needed while ffd runs)
   click a column     sort by it (again to reverse)
   Esc                clear the search box, or quit when it is empty
@@ -91,7 +94,36 @@ enum Action {
     /// The answers from those confirmation dialogs.
     ConfirmTrash,
     ConfirmDelete,
-    Preferences,
+    ToggleRegex,
+    ToggleWord,
+    /// A page of the help sheet: 0 search, 1 filters, 2 shortcuts.
+    Help(u8),
+    /// A page of the Options window: 0 interface, 1 search, 2 results,
+    /// 3 view, 4 desktop, 5 live updates, 6 drives.
+    Options(u8),
+    Toggle(Flag),
+    /// Colours: 0 follow the desktop, 1 light, 2 dark.
+    Theme(u8),
+    /// How sizes are written: 0 automatic, 1 bytes, 2 KB, 3 MB.
+    SizeFormat(u8),
+    /// The Drives page: its checkboxes (by drive number), and Apply.
+    DriveIndex(u8),
+    DriveLive(u8),
+    ApplyDrives,
+    /// The Options window's OK and Apply: save the index settings.
+    OptionsOk,
+    OptionsApply,
+    /// The Exclude page.
+    ToggleExcludeHidden,
+    SelectExclude(u8),
+    RemoveExclude,
+    /// Adds the folder typed into the text field / selected in the results.
+    AddExclude,
+    AddSelectedExclude,
+    ApplyExcludes,
+    /// Picks the drive whose settings are shown.
+    SelectDrive(u8),
+    ToggleAutoDrives,
     Cut,
     Copy,
     Paste,
@@ -110,6 +142,37 @@ enum Action {
     ToggleLauncher,
     ToggleDaemon,
 }
+
+/// An on/off option, in the order of `FLAGS`.
+#[derive(Clone, Copy, PartialEq)]
+enum Flag {
+    HideEmpty,
+    CloseOnOpen,
+    PathDoubleClick,
+    DateDescFirst,
+    SizeDescFirst,
+    QuotePaths,
+    AltRows,
+    RowHover,
+    SelectedInStatus,
+    WildcardWholeName,
+    MatchPath,
+}
+
+/// Each option's name in the settings file and its default.
+const FLAGS: [(&str, bool); 11] = [
+    ("hide_results_when_empty", false),
+    ("close_on_open", false),
+    ("path_double_click", true),
+    ("date_descending_first", false),
+    ("size_descending_first", false),
+    ("quote_copied_paths", false),
+    ("alternate_rows", false),
+    ("row_mouseover", false),
+    ("selected_in_status_bar", false),
+    ("wildcards_whole_name", true),
+    ("match_path", false),
+];
 
 /// Menu entries: label, shortcut hint, action.
 type Items = &'static [(&'static str, &'static str, Action)];
@@ -147,8 +210,6 @@ const BAR: [(&str, Items); 5] = [
             ("Open folder", "Ctrl+Enter", Action::Reveal),
             ("Copy full path", "Ctrl+Shift+C", Action::CopyPath),
             ("Copy name", "", Action::CopyName),
-            ("Move to trash", "Del", Action::Trash),
-            ("Delete permanently", "Shift+Del", Action::DeleteForever),
             ("Properties", "Alt+Enter", Action::Properties),
             ("Rebuild index", "F5", Action::Reindex),
             ("Quit", "Ctrl+Q", Action::Quit),
@@ -162,6 +223,8 @@ const BAR: [(&str, Items); 5] = [
             ("Paste", "Ctrl+V", Action::Paste),
             ("Select all text", "Ctrl+A", Action::SelectAll),
             ("Select all results", "Ctrl+Shift+A", Action::SelectAllResults),
+            ("Move to trash", "Del", Action::Trash),
+            ("Delete permanently", "Shift+Del", Action::DeleteForever),
         ],
     ),
     (
@@ -173,12 +236,15 @@ const BAR: [(&str, Items); 5] = [
             ("Smart case", "F3", Action::Case(CaseMode::Smart)),
             ("Case sensitive", "", Action::Case(CaseMode::Sensitive)),
             ("Case insensitive", "", Action::Case(CaseMode::Insensitive)),
+            ("Regular expressions", "Ctrl+R", Action::ToggleRegex),
+            ("Whole words only", "Ctrl+B", Action::ToggleWord),
         ],
     ),
     (
         "Options",
         &[
-            ("Preferences...", "", Action::Preferences),
+            ("Options...", "Ctrl+P", Action::Options(0)),
+            ("Drives...", "", Action::Options(6)),
             ("Zoom in", "Ctrl++", Action::ZoomIn),
             ("Zoom out", "Ctrl+-", Action::ZoomOut),
             ("Reset zoom", "Ctrl+0", Action::ZoomReset),
@@ -188,7 +254,15 @@ const BAR: [(&str, Items); 5] = [
             ("Live updates service", "asks for password", Action::ToggleDaemon),
         ],
     ),
-    ("Help", &[("About Fast search", "", Action::About)]),
+    (
+        "Help",
+        &[
+            ("Search syntax", "F1", Action::Help(0)),
+            ("Filters", "", Action::Help(1)),
+            ("Keyboard shortcuts", "", Action::Help(2)),
+            ("About Fast search", "", Action::About),
+        ],
+    ),
 ];
 
 /// An open menu: a result's right-click menu or one from the menu bar.
@@ -252,6 +326,10 @@ struct App {
     top: usize,
     kind: Kind,
     case: CaseMode,
+    regex: bool,
+    whole_word: bool,
+    /// What the search engine could not understand in the query, if anything.
+    query_error: Option<String>,
     sort: Sort,
     reverse: bool,
     status: String,
@@ -300,6 +378,32 @@ struct App {
     drag: Option<Drag>,
     /// The open dialog window, if any; it is modal.
     dialog: Option<Dialog>,
+    /// The on/off options, indexed by `Flag`.
+    flags: [bool; FLAGS.len()],
+    size_format: u8,
+    theme: u8,
+    /// Row under the pointer, for the mouseover highlight.
+    hover_row: Option<usize>,
+    /// Text of the open dialog's text field.
+    dialog_input: String,
+    /// The Drives and Exclude pages were filled from the current
+    /// settings since the Options window opened (they then hold edits).
+    index_settings_loaded: bool,
+    /// The Drives or Exclude page has changes that are not saved yet.
+    index_settings_dirty: bool,
+    /// Folders left out of the index, as edited on the Exclude page.
+    excludes: Vec<String>,
+    exclude_selected: usize,
+    exclude_hidden: bool,
+    /// The page of the Options window last shown.
+    options_page: Option<u8>,
+    /// Options for the next rebuild, when they differ from the last one's.
+    pending_build: Option<BuildOptions>,
+    /// The drives as shown (and edited) on the Drives screen.
+    drives: Vec<settings::Drive>,
+    drive_selected: usize,
+    /// Mounted drives are indexed without being asked.
+    auto_drives: bool,
     /// The files a confirmation dialog is asking about.
     pending_paths: Vec<PathBuf>,
     /// Paths (one per line) offered to the program a drag was dropped on.
@@ -681,7 +785,14 @@ impl App {
             collapse_on_release: None,
             top: 0,
             kind: Kind::Any,
-            case: CaseMode::Smart,
+            case: match config.case.as_str() {
+                "sensitive" => CaseMode::Sensitive,
+                "insensitive" => CaseMode::Insensitive,
+                _ => CaseMode::Smart,
+            },
+            regex: config.regex,
+            whole_word: config.whole_word,
+            query_error: None,
             sort: Sort::None,
             reverse: false,
             status: String::new(),
@@ -714,6 +825,21 @@ impl App {
             dnd,
             drag: None,
             dialog: None,
+            flags: FLAGS.map(|(key, default)| config.more.get(key).map_or(default, |v| v == "on")),
+            size_format: config.more.get("size_format").and_then(|v| v.parse().ok()).filter(|f| *f < 4).unwrap_or(2),
+            theme: config.more.get("theme").and_then(|v| v.parse().ok()).filter(|t| *t < 3).unwrap_or(0),
+            hover_row: None,
+            dialog_input: String::new(),
+            index_settings_loaded: false,
+            index_settings_dirty: false,
+            excludes: Vec::new(),
+            exclude_selected: 0,
+            exclude_hidden: false,
+            options_page: None,
+            drives: Vec::new(),
+            pending_build: None,
+            drive_selected: 0,
+            auto_drives: true,
             pending_paths: Vec::new(),
             dropped: String::new(),
             drop_moved: false,
@@ -721,6 +847,7 @@ impl App {
             last_click: (0, usize::MAX),
         };
         app.apply_title_bar();
+        app.apply_theme();
         app.cv.resize(w as usize, h as usize);
         app.c.req(8, 0, &[W(win)]); // MapWindow
         Ok(app)
@@ -770,7 +897,44 @@ impl App {
             }
             Ok("confirm") => self.act(Action::Trash, 0),
             Ok("confirm-forever") => self.act(Action::DeleteForever, 0),
-            Ok("prefs") => self.act(Action::Preferences, 0),
+            Ok("prefs") => self.act(Action::Options(0), 0),
+            Ok("options1") => self.act(Action::Options(1), 0),
+            Ok("options2") => self.act(Action::Options(2), 0),
+            Ok("options3") => self.act(Action::Options(3), 0),
+            Ok("drives") => self.act(Action::Options(6), 0),
+            Ok("apply-preview") => {
+                // Ticks the first unmounted NTFS drive and prints the daemon
+                // command Apply would run (tests only; nothing is executed).
+                self.load_index_settings();
+                if let Some(d) = self.drives.iter_mut().find(|d| d.mount.is_empty() && d.fstype == "ntfs") {
+                    d.index = true;
+                }
+                let drives: Vec<_> = self.drives.iter().map(|d| (d.path.clone(), !d.mount.is_empty(), d.index, d.live)).collect();
+                let args = settings::configure_args(&drives, self.auto_drives, &self.excludes, self.exclude_hidden);
+                eprintln!("pkexec ffd {}", args.join(" "));
+                return Ok(());
+            }
+            Ok("exclude-apply") => {
+                // Excludes hidden names and the folder given in FF_GUI_TEST_DIR,
+                // rebuilds, and reports (tests only; use with --db).
+                self.load_index_settings();
+                self.excludes = std::env::var("FF_GUI_TEST_DIR").into_iter().collect();
+                self.exclude_hidden = true;
+                self.index_settings_dirty = true;
+                self.act(Action::OptionsOk, 0);
+                eprintln!("entries: {} | hidden left out: {} | status: {}", self.index.len(), self.index.skips_hidden(), self.status);
+                return Ok(());
+            }
+            Ok("exclude") => {
+                self.act(Action::Options(7), 0);
+                self.excludes = vec!["/home/me/Videos".into(), "/mnt/backup".into()];
+                self.dialog_input = "/var/cache".into();
+                self.act(Action::Options(7), 0);
+            }
+            Ok("help0") => self.act(Action::Help(0), 0),
+            Ok("help1") => self.act(Action::Help(1), 0),
+            Ok("help2") => self.act(Action::Help(2), 0),
+            Ok("regex") => self.act(Action::ToggleRegex, 0),
             Ok("ghost") => {
                 // Saves the drag image of the selected result and exits.
                 if let (Some(&id), Some(file)) = (self.hits.get(self.sel), std::env::var_os("FF_GUI_SNAPSHOT")) {
@@ -922,7 +1086,13 @@ impl App {
                     let data = self.c.get_property(self.win, self.paste_prop, true)?;
                     let text = String::from_utf8_lossy(&data);
                     let line: String = text.lines().next().unwrap_or("").chars().filter(|c| !c.is_control()).collect();
-                    self.insert(&line);
+                    if self.dialog.is_some() {
+                        // Pasted into the dialog's text field.
+                        self.dialog_input.push_str(&line);
+                        self.render_dialog()?;
+                    } else {
+                        self.insert(&line);
+                    }
                     dirty = true;
                 }
                 EV_CLIENT_MESSAGE if u32at(&ev, 12) == self.wm_delete && window == self.win => return Ok(()),
@@ -942,7 +1112,21 @@ impl App {
             reverse: self.reverse,
             ..Default::default()
         };
-        self.hits = self.index.search(&Query::parse_with(&self.query, self.case), &opts);
+        let how = ff_core::QueryOptions {
+            case: self.case,
+            regex: self.regex,
+            whole_word: self.whole_word,
+            match_path: self.flag(Flag::MatchPath),
+            wildcards_anywhere: !self.flag(Flag::WildcardWholeName),
+        };
+        let query = Query::parse_opts(&self.query, &how);
+        self.query_error = query.error().map(String::from);
+        self.hits = if self.flag(Flag::HideEmpty) && self.query.trim().is_empty() {
+            Vec::new() // an empty search box shows an empty list
+        } else {
+            self.index.search(&query, &opts)
+        };
+        self.hover_row = None;
         self.sel = 0;
         self.top = 0;
         self.marks.clear();
@@ -1090,7 +1274,8 @@ impl App {
         }
         self.status = "Indexing...".into();
         self.render()?;
-        match Index::build(&BuildOptions::refresh(&self.index)) {
+        let opts = self.pending_build.take().unwrap_or_else(|| BuildOptions::refresh(&self.index));
+        match Index::build(&opts) {
             Ok(index) => {
                 self.status = match index.save(&self.db) {
                     Ok(()) => String::new(),
@@ -1137,6 +1322,7 @@ impl App {
             }
             Action::Case(case) => {
                 self.case = case;
+                self.save_config();
                 return self.search();
             }
             Action::Reindex => {
@@ -1146,22 +1332,135 @@ impl App {
                 return;
             }
             Action::About => return self.about = true,
-            Action::Preferences => {
-                self.refresh_option_states();
-                let rows = vec![
-                    Row::Dim("Window".into()),
-                    Row::Check("Title bar with the application icon", Action::ToggleTitleBar),
-                    Row::Pair("Zoom", format!("{:.0}%  (Ctrl +, Ctrl -, Ctrl 0)", self.scale * 100.0)),
-                    Row::Gap,
-                    Row::Dim("Desktop".into()),
-                    Row::Check("Global shortcut Alt+E opens Fast search", Action::ToggleShortcut),
-                    Row::Check("Show in the applications menu", Action::ToggleLauncher),
-                    Row::Gap,
-                    Row::Dim("Index".into()),
-                    Row::Check("Live updates service (asks for your password)", Action::ToggleDaemon),
-                    Row::Pair("Index file", self.db.display().to_string()),
-                ];
-                if let Err(e) = self.open_dialog("Preferences", rows, vec![("Close", None)], 0, false) {
+            Action::Toggle(flag) => {
+                self.flags[flag as usize] = !self.flags[flag as usize];
+                self.save_config();
+                // Options that change which results are found.
+                if matches!(flag, Flag::HideEmpty | Flag::MatchPath | Flag::WildcardWholeName) {
+                    self.search();
+                }
+                return;
+            }
+            Action::SizeFormat(format) => {
+                self.size_format = format;
+                return self.save_config();
+            }
+            Action::Theme(theme) => {
+                self.theme = theme;
+                self.apply_theme();
+                return self.save_config();
+            }
+            Action::ToggleRegex => {
+                self.regex = !self.regex;
+                self.save_config();
+                return self.search();
+            }
+            Action::ToggleWord => {
+                self.whole_word = !self.whole_word;
+                self.save_config();
+                return self.search();
+            }
+            Action::Options(page) => {
+                if let Err(e) = self.open_options(page) {
+                    self.status = e.to_string();
+                }
+                return;
+            }
+            Action::OptionsOk | Action::OptionsApply => {
+                // Only the index settings wait for this; everything else
+                // in the window takes effect as it is changed.
+                if !std::mem::take(&mut self.index_settings_dirty) {
+                    return;
+                }
+                let service = settings::daemon_installed();
+                return self.act(if service { Action::ApplyDrives } else { Action::ApplyExcludes }, time);
+            }
+            Action::ToggleExcludeHidden => {
+                self.index_settings_dirty = true;
+                return self.exclude_hidden = !self.exclude_hidden;
+            }
+            Action::SelectExclude(i) => return self.exclude_selected = i as usize,
+            Action::RemoveExclude => {
+                self.index_settings_dirty = true;
+                if self.exclude_selected < self.excludes.len() {
+                    self.excludes.remove(self.exclude_selected);
+                    self.exclude_selected = self.exclude_selected.min(self.excludes.len().saturating_sub(1));
+                }
+                return;
+            }
+            Action::AddExclude | Action::AddSelectedExclude => {
+                // From the text field, or the folder selected in the results
+                // (the folder holding it, if a file is selected).
+                let folder = if action == Action::AddExclude {
+                    std::mem::take(&mut self.dialog_input).trim().trim_end_matches('/').to_string()
+                } else {
+                    let Some(&id) = self.hits.get(self.sel) else {
+                        self.status = "Select a folder in the results first".into();
+                        return;
+                    };
+                    let folder = if self.index.is_dir(id) { Some(id) } else { self.index.parent(id) };
+                    folder.map(|f| self.index.path(f).to_string_lossy().into_owned()).unwrap_or_default()
+                };
+                if !folder.starts_with('/') {
+                    self.status = "A folder to exclude must be a full path, like /home/me/Videos".into();
+                } else if !self.excludes.contains(&folder) {
+                    self.exclude_selected = self.excludes.len();
+                    self.excludes.push(folder);
+                    self.index_settings_dirty = true;
+                }
+                return;
+            }
+            Action::ApplyExcludes => {
+                if self.db.as_os_str() == ff_core::SYSTEM_DB {
+                    // The live updates service owns this index: its settings
+                    // are saved together, drives included.
+                    return self.act(Action::ApplyDrives, time);
+                }
+                if self.drives.iter().any(|d| d.mount.is_empty() && d.index) {
+                    self.status = "Reading a drive that is not mounted needs the live updates service (Indexes > Live updates)".into();
+                    return;
+                }
+                let mut opts = BuildOptions::refresh(&self.index);
+                opts.excludes = BuildOptions::new(["/"]).excludes; // the standard ones
+                opts.excludes.extend(self.excludes.iter().map(PathBuf::from));
+                opts.skip_hidden = self.exclude_hidden;
+                self.pending_build = Some(opts);
+                if let Err(e) = self.reindex() {
+                    self.status = e.to_string();
+                }
+                return;
+            }
+            Action::SelectDrive(i) => return self.drive_selected = i as usize,
+            Action::ToggleAutoDrives => {
+                self.index_settings_dirty = true;
+                return self.auto_drives = !self.auto_drives;
+            }
+            Action::DriveIndex(i) | Action::DriveLive(i) => {
+                self.index_settings_dirty = true;
+                if let Some(drive) = self.drives.get_mut(i as usize) {
+                    match action {
+                        Action::DriveIndex(_) => drive.index = !drive.index,
+                        _ => drive.live = !drive.live,
+                    }
+                }
+                return;
+            }
+            Action::ApplyDrives => {
+                if !settings::daemon_installed() {
+                    self.status = "Drive settings need the live updates service: turn it on under Indexes > Live updates".into();
+                    return;
+                }
+                self.load_index_settings();
+                self.status = "Waiting for authorization...".into();
+                let settings: Vec<_> =
+                    self.drives.iter().map(|d| (d.path.clone(), !d.mount.is_empty(), d.index, d.live)).collect();
+                let (tx, automatic) = (self.notice_tx.clone(), self.auto_drives);
+                let (excludes, no_hidden) = (self.excludes.clone(), self.exclude_hidden);
+                std::thread::spawn(move || tx.send(settings::apply_drives(settings, automatic, excludes, no_hidden)));
+                return;
+            }
+            Action::Help(page) => {
+                if let Err(e) = self.open_help(page) {
                     self.status = e.to_string();
                 }
                 return;
@@ -1189,9 +1488,20 @@ impl App {
                 return self.forget(&paths);
             }
             Action::Quit => return self.quit = true,
-            Action::ZoomIn => return self.set_scale(Some(self.scale + 0.25)),
-            Action::ZoomOut => return self.set_scale(Some(self.scale - 0.25)),
-            Action::ZoomReset => return self.set_scale(None),
+            Action::ZoomIn | Action::ZoomOut | Action::ZoomReset => {
+                self.set_scale(match action {
+                    Action::ZoomIn => Some(self.scale + 0.25),
+                    Action::ZoomOut => Some(self.scale - 0.25),
+                    _ => None,
+                });
+                // The Options window is sized for the old zoom: reopen it.
+                if self.paged_dialog_open() {
+                    let page = self.options_page.unwrap_or(0);
+                    self.close_dialog();
+                    let _ = self.open_options(page);
+                }
+                return;
+            }
             Action::ToggleTitleBar => {
                 self.custom_title = !self.custom_title;
                 self.apply_title_bar();
@@ -1233,6 +1543,11 @@ impl App {
         match action {
             Action::Open if paths.len() > 20 => {
                 self.status = format!("{} results selected: open at most 20 at a time", paths.len());
+            }
+            Action::Open if self.flag(Flag::CloseOnOpen) => {
+                // Open first, then close: nothing is left running to do it later.
+                paths.iter().for_each(|p| drop(desktop::open(p)));
+                self.quit = true;
             }
             Action::Open => {
                 self.status = if many { format!("Opening {} items", paths.len()) } else { format!("Opening {}", path.display()) };
@@ -1284,6 +1599,10 @@ impl App {
                 std::thread::spawn(move || desktop::open_in_editor(&path));
             }
             Action::CopyFile => self.copy(lines(&paths), true),
+            Action::CopyPath if self.flag(Flag::QuotePaths) => {
+                let quoted: Vec<String> = paths.iter().map(|p| format!("\"{}\"", p.display())).collect();
+                self.copy(quoted.join("\n"), false);
+            }
             Action::CopyPath => self.copy(lines(&paths), false),
             Action::CopyName => {
                 let names: Vec<String> = paths
@@ -1306,6 +1625,260 @@ impl App {
         let Some(&id) = self.hits.get(self.sel) else { return CONTEXT_MENU };
         let icon = Icon::of(self.index.name(id), self.index.is_dir(id), self.index.is_symlink(id));
         if matches!(icon, Icon::Text | Icon::Code | Icon::File | Icon::Link) { TEXT_CONTEXT_MENU } else { CONTEXT_MENU }
+    }
+
+    /// Opens a page of the Options window: categories down the left,
+    /// the chosen page on the right. Changes apply as they are made,
+    /// except drive settings, which have their own Apply button.
+    fn open_options(&mut self, page: u8) -> io::Result<()> {
+        let page = page.min(7);
+        self.refresh_option_states();
+        self.load_index_settings();
+        let nav = vec![
+            NavItem { label: "General", child: false, action: Action::Options(0) },
+            NavItem { label: "Interface", child: true, action: Action::Options(0) },
+            NavItem { label: "Search", child: true, action: Action::Options(1) },
+            NavItem { label: "Results", child: true, action: Action::Options(2) },
+            NavItem { label: "View", child: true, action: Action::Options(3) },
+            NavItem { label: "Desktop", child: true, action: Action::Options(4) },
+            NavItem { label: "Indexes", child: false, action: Action::Options(5) },
+            NavItem { label: "Live updates", child: true, action: Action::Options(5) },
+            NavItem { label: "Drives", child: true, action: Action::Options(6) },
+            NavItem { label: "Exclude", child: true, action: Action::Options(7) },
+        ];
+        let selected = [1, 2, 3, 4, 5, 7, 8, 9][page as usize];
+        let (heading, rows) = match page {
+            0 => (
+                "Interface",
+                vec![
+                    Row::Check("Title bar with the application icon", Action::ToggleTitleBar),
+                    Row::Gap,
+                    Row::Pair("Zoom", format!("{:.0}%", self.scale * 100.0)),
+                    Row::Button("Zoom in", Action::ZoomIn),
+                    Row::Button("Zoom out", Action::ZoomOut),
+                    Row::Button("Reset to the desktop scale", Action::ZoomReset),
+                    Row::Gap,
+                    Row::Dim("Theme".into()),
+                    Row::Check("Follow the desktop", Action::Theme(0)),
+                    Row::Check("Light", Action::Theme(1)),
+                    Row::Check("Dark", Action::Theme(2)),
+                ],
+            ),
+            1 => (
+                "Search",
+                vec![
+                    Row::Dim("How the search text is read".into()),
+                    Row::Check("Regular expressions", Action::ToggleRegex),
+                    Row::Check("Match whole words only", Action::ToggleWord),
+                    Row::Check("Match the full path, not just the name", Action::Toggle(Flag::MatchPath)),
+                    Row::Check("Match whole filename when using wildcards", Action::Toggle(Flag::WildcardWholeName)),
+                    Row::Gap,
+                    Row::Dim("Letter case".into()),
+                    Row::Check("Smart: exact only when you type an uppercase letter", Action::Case(CaseMode::Smart)),
+                    Row::Check("Always case-sensitive", Action::Case(CaseMode::Sensitive)),
+                    Row::Check("Never case-sensitive", Action::Case(CaseMode::Insensitive)),
+                    Row::Gap,
+                    Row::Dim("Show".into()),
+                    Row::Check("Files and folders", Action::Show(Kind::Any)),
+                    Row::Check("Files only", Action::Show(Kind::File)),
+                    Row::Check("Folders only", Action::Show(Kind::Dir)),
+                ],
+            ),
+            2 => (
+                "Results",
+                vec![
+                    Row::Check("Hide results when the search is empty", Action::Toggle(Flag::HideEmpty)),
+                    Row::Check("Close window on execute", Action::Toggle(Flag::CloseOnOpen)),
+                    Row::Check("Open path with double click in path column", Action::Toggle(Flag::PathDoubleClick)),
+                    Row::Check("Double quote copy as path", Action::Toggle(Flag::QuotePaths)),
+                    Row::Gap,
+                    Row::Dim("First click on a column header".into()),
+                    Row::Check("Sort date descending first (newest on top)", Action::Toggle(Flag::DateDescFirst)),
+                    Row::Check("Sort size descending first (largest on top)", Action::Toggle(Flag::SizeDescFirst)),
+                ],
+            ),
+            3 => (
+                "View",
+                vec![
+                    Row::Check("Alternate row color", Action::Toggle(Flag::AltRows)),
+                    Row::Check("Show row mouseover", Action::Toggle(Flag::RowHover)),
+                    Row::Check("Show selected item in status bar", Action::Toggle(Flag::SelectedInStatus)),
+                    Row::Gap,
+                    Row::Dim("Size format".into()),
+                    Row::Check("Auto (B, KB, MB, GB)", Action::SizeFormat(0)),
+                    Row::Check("Bytes", Action::SizeFormat(1)),
+                    Row::Check("KB", Action::SizeFormat(2)),
+                    Row::Check("MB", Action::SizeFormat(3)),
+                ],
+            ),
+            4 => (
+                "Desktop",
+                vec![
+                    Row::Check("Global shortcut Alt+E opens Fast search", Action::ToggleShortcut),
+                    Row::Check("Show in the applications menu", Action::ToggleLauncher),
+                ],
+            ),
+            5 => (
+                "Live updates",
+                vec![
+                    Row::Check("Keep the index current with the live updates service", Action::ToggleDaemon),
+                    Row::Dim("Switching it asks for your password. Everyone in your group can then".into()),
+                    Row::Dim("search the names of all files on this computer.".into()),
+                    Row::Gap,
+                    Row::Pair("Index file", self.db.display().to_string()),
+                    Row::Pair("Indexed", format!("{} files and folders", group_digits(self.index.len() as u64))),
+                    Row::Gap,
+                    Row::Button("Rebuild the index now", Action::Reindex),
+                ],
+            ),
+            7 => {
+                let mut rows = vec![
+                    Row::Check("Exclude hidden files and folders (names starting with a dot)", Action::ToggleExcludeHidden),
+                    Row::Gap,
+                    Row::Dim("Excluded folders:".into()),
+                ];
+                if self.excludes.is_empty() {
+                    rows.push(Row::Dim("      (none)".into()));
+                }
+                for (i, folder) in self.excludes.iter().enumerate().take(8) {
+                    rows.push(Row::ListItem(folder.clone(), Action::SelectExclude(i as u8)));
+                }
+                if !self.excludes.is_empty() {
+                    rows.push(Row::Button("Remove the selected folder", Action::RemoveExclude));
+                }
+                rows.push(Row::Gap);
+                rows.push(Row::Dim("Add a folder: type or paste its full path, then press Enter".into()));
+                rows.push(Row::Input("/path/to/folder", Action::AddExclude));
+                rows.push(Row::Button("Add the folder selected in the results", Action::AddSelectedExclude));
+                rows.push(Row::Gap);
+                rows.push(Row::Dim("Always excluded: /proc, /sys, /dev, /run, /.snapshots and trash folders.".into()));
+                rows.push(Row::Gap);
+                rows.push(Row::Dim(self.save_hint().into()));
+                ("Exclude", rows)
+            }
+            _ => {
+                let mut rows = vec![
+                    Row::Check("Automatically include drives when they are mounted", Action::ToggleAutoDrives),
+                    Row::Dim("Drives that go away are always removed from the index.".into()),
+                    Row::Gap,
+                    Row::Dim("Drives:".into()),
+                ];
+                if self.drives.is_empty() {
+                    rows.push(Row::Dim("No drives found (this needs the lsblk command).".into()));
+                }
+                for (i, drive) in self.drives.iter().enumerate().take(12) {
+                    let place = if drive.mount.is_empty() { "not mounted" } else { &drive.mount };
+                    let state = if drive.index { "included" } else { "not included" };
+                    let line = format!("{}      {}      {}      {place}      {state}", drive.path, drive.fstype, drive.size);
+                    rows.push(Row::ListItem(line, Action::SelectDrive(i as u8)));
+                }
+                if let Some(drive) = self.drives.get(self.drive_selected) {
+                    let i = self.drive_selected as u8;
+                    rows.push(Row::Gap);
+                    rows.push(Row::Dim(format!("Settings for {}", drive.path)));
+                    if !drive.can_index {
+                        rows.push(Row::Dim("This kind of drive can only be indexed while it is mounted.".into()));
+                    } else if drive.mount.is_empty() {
+                        rows.push(Row::Check("Include in the index (read directly, without mounting it)", Action::DriveIndex(i)));
+                        rows.push(Row::Dim("Its files can be found, but not opened until it is mounted.".into()));
+                    } else {
+                        rows.push(Row::Check("Include in the index", Action::DriveIndex(i)));
+                        rows.push(Row::Check("Monitor changes", Action::DriveLive(i)));
+                    }
+                }
+                rows.push(Row::Gap);
+                rows.push(Row::Dim(self.save_hint().into()));
+                ("Drives", rows)
+            }
+        };
+        self.options_page = Some(page);
+        self.open_paged_dialog("Options", nav, selected, heading, rows)
+    }
+
+    /// Opens a page of the help sheet: what to type, with examples.
+    fn open_help(&mut self, page: u8) -> io::Result<()> {
+        let pair = |example: &'static str, meaning: &str| Row::Pair(example, meaning.to_string());
+        let head = |title: &str| Row::Dim(title.to_string());
+        let (title, rows) = match page {
+            0 => (
+                "Search syntax",
+                vec![
+                    Row::Text("Type words: results contain all of them, in any order.".into()),
+                    Row::Gap,
+                    pair("report", "names containing \"report\""),
+                    pair("report 2026", "names containing both words"),
+                    pair("\"my file\"", "quotes keep a space inside a word"),
+                    pair("*.pdf", "wildcard on the whole name: * any text, ? one character"),
+                    pair("src/main", "a slash searches the full path, not just the name"),
+                    pair("!draft", "names that do not contain \"draft\""),
+                    pair("Report", "an uppercase letter makes that word case-sensitive"),
+                    Row::Gap,
+                    head("Options (also in the View menu)"),
+                    pair("Ctrl+R", "regular expressions, such as  ^IMG_\\d+\\.jpe?g$"),
+                    pair("Ctrl+B", "whole words only: \"port\" finds \"port 80\", not \"report\""),
+                    pair("F3", "letter case: smart, sensitive, insensitive"),
+                    pair("F2", "show everything, files only, or folders only"),
+                ],
+            ),
+            1 => (
+                "Filters",
+                vec![
+                    Row::Text("Filters narrow the results; mix them with words.".into()),
+                    Row::Gap,
+                    head("By extension"),
+                    pair("ext:pdf", "PDF files"),
+                    pair("ext:jpg;png;gif", "any of several extensions"),
+                    pair("ext:tar.gz", "compound extensions"),
+                    head("By size  (K, M, G, T;  1K = 1024 bytes)"),
+                    pair("size:>100M", "larger than 100 MB  (also  >=  <  <=)"),
+                    pair("size:10M..1G", "between 10 MB and 1 GB"),
+                    pair("size:0", "empty files"),
+                    head("By date modified  (dm: for short)"),
+                    pair("modified:today", "since midnight  (also  yesterday)"),
+                    pair("modified:3h", "in the last 3 hours"),
+                    pair("modified:7d", "in the last 7 days"),
+                    pair("modified:2026-10-24", "on that day"),
+                    pair("modified:2026-01-01..2026-06-30", "between two dates"),
+                    pair("modified:2026-01-01..", "since a date   ( ..date  means before )"),
+                    head("Together"),
+                    pair("invoice ext:pdf size:>1M dm:30d", "big PDF invoices from the last month"),
+                ],
+            ),
+            _ => (
+                "Keyboard shortcuts",
+                vec![
+                    pair("Up, Down, PgUp, PgDn", "move through the results"),
+                    pair("Ctrl+Home, Ctrl+End", "first and last result"),
+                    pair("Shift + those keys", "select several results  (also Shift+click, Ctrl+click)"),
+                    pair("Ctrl+Shift+A", "select all results"),
+                    pair("Enter", "open                        (double-click)"),
+                    pair("F4", "open in the text editor"),
+                    pair("Ctrl+Enter", "show in the file manager    (double-click the path)"),
+                    pair("Alt+Enter", "properties"),
+                    pair("Ctrl+C", "copy the files, to paste in a file manager"),
+                    pair("Ctrl+Shift+C", "copy the full paths"),
+                    pair("Del", "move to the trash  (asks first)"),
+                    pair("Shift+Del", "delete permanently  (asks first)"),
+                    pair("Drag", "move to another window; hold Ctrl to copy"),
+                    pair("Ctrl+V, Ctrl+X, Ctrl+A", "paste, cut, select all in the search box"),
+                    pair("Ctrl+R, Ctrl+B", "regular expressions, whole words"),
+                    pair("F2, F3", "files or folders, letter case"),
+                    pair("F5", "rebuild the index"),
+                    pair("Ctrl +, Ctrl -, Ctrl 0", "zoom in, out, reset"),
+                    pair("Esc", "clear the search box; quit when it is empty"),
+                ],
+            ),
+        };
+        // Buttons lead to the other pages; Close has the focus.
+        let pages: [crate::dialog::Button; 3] = [("Search syntax", Some(Action::Help(0))), ("Filters", Some(Action::Help(1))), ("Shortcuts", Some(Action::Help(2)))];
+        let mut buttons: Vec<crate::dialog::Button> = pages.into_iter().enumerate().filter(|(i, _)| *i as u8 != page.min(2)).map(|(_, b)| b).collect();
+        buttons.push(("Close", None));
+        let focus = buttons.len() - 1;
+        self.open_dialog(title, rows, buttons, focus, false)?;
+        if let Some(dialog) = self.dialog.as_mut() {
+            dialog.sheet = true;
+        }
+        self.render_dialog()
     }
 
     /// Re-reads the state of the options that live outside this program.
@@ -1333,10 +1906,85 @@ impl App {
         self.top = top.min(self.max_top());
     }
 
+    /// Switches the palette to the chosen theme; "follow the desktop"
+    /// asks the desktop whether it prefers dark.
+    fn apply_theme(&mut self) {
+        let dark = match self.theme {
+            1 => false,
+            2 => true,
+            _ => settings::desktop_prefers_dark(),
+        };
+        canvas::set_dark(dark);
+    }
+
+    /// The line on the index pages saying how their changes are saved.
+    fn save_hint(&self) -> &'static str {
+        match (self.index_settings_dirty, settings::daemon_installed()) {
+            (true, true) => "Not saved yet: press Apply or OK (asks for your password, rebuilds the index).",
+            (true, false) => "Not saved yet: press Apply or OK (rebuilds the index).",
+            (false, true) => "Changes here are saved with Apply or OK, which asks for your password.",
+            (false, false) => "Changes here are saved with Apply or OK, which rebuilds the index.",
+        }
+    }
+
+    /// Fills the Drives and Exclude pages from the current settings, once
+    /// per opening of the Options window; after that they hold the edits.
+    fn load_index_settings(&mut self) {
+        if std::mem::replace(&mut self.index_settings_loaded, true) {
+            return;
+        }
+        self.index_settings_dirty = false;
+        self.drives = settings::drives();
+        self.auto_drives = settings::drives_automatic();
+        self.drive_selected = 0;
+        // The index records what was left out when it was built; the
+        // standard exclusions are not listed.
+        let standard = BuildOptions::new(["/"]).excludes;
+        self.excludes = self.index.excludes().filter(|x| !standard.contains(x)).map(|x| x.to_string_lossy().into_owned()).collect();
+        self.exclude_selected = 0;
+        self.exclude_hidden = self.index.skips_hidden();
+    }
+
+    fn flag(&self, flag: Flag) -> bool {
+        self.flags[flag as usize]
+    }
+
+    /// A file size as the Size column shows it.
+    fn size_text(&self, bytes: u64) -> String {
+        match self.size_format {
+            1 => format!("{} B", group_digits(bytes)),
+            3 => format!("{} MB", group_digits(bytes.div_ceil(1 << 20))),
+            0 => {
+                // Automatic: the largest unit that keeps the number readable.
+                let (mut value, mut unit) = (bytes as f64, "B");
+                for next in ["KB", "MB", "GB", "TB"] {
+                    if value < 1024.0 {
+                        break;
+                    }
+                    value /= 1024.0;
+                    unit = next;
+                }
+                if unit == "B" { format!("{bytes} B") } else { format!("{value:.1} {unit}") }
+            }
+            _ => format!("{} KB", group_digits(bytes.div_ceil(1024))),
+        }
+    }
+
     /// True if a toggle or choice in a menu is currently on.
     fn checked(&self, action: Action) -> bool {
         match action {
             Action::Show(kind) => kind == self.kind,
+            Action::ToggleRegex => self.regex,
+            Action::Toggle(flag) => self.flag(flag),
+            Action::SizeFormat(format) => format == self.size_format,
+            Action::Theme(theme) => theme == self.theme,
+            Action::SelectExclude(i) => i as usize == self.exclude_selected,
+            Action::ToggleExcludeHidden => self.exclude_hidden,
+            Action::SelectDrive(i) => i as usize == self.drive_selected,
+            Action::ToggleAutoDrives => self.auto_drives,
+            Action::DriveIndex(i) => self.drives.get(i as usize).is_some_and(|d| d.index),
+            Action::DriveLive(i) => self.drives.get(i as usize).is_some_and(|d| d.live && d.index),
+            Action::ToggleWord => self.whole_word,
             Action::Case(case) => case == self.case,
             Action::ToggleTitleBar => self.custom_title,
             Action::ToggleShortcut => self.shortcut_on,
@@ -1356,7 +2004,13 @@ impl App {
     fn save_config(&mut self) {
         // Only a zoom the user chose is saved; otherwise we keep following the desktop.
         let scale = (self.scale != self.auto_scale).then_some(self.scale);
-        if let Err(e) = (Config { scale, own_title_bar: self.custom_title }).save() {
+        let case = ["smart", "sensitive", "insensitive"][self.case as usize].to_string();
+        let mut more: std::collections::BTreeMap<String, String> =
+            FLAGS.iter().zip(self.flags).map(|((key, _), on)| (key.to_string(), if on { "on" } else { "off" }.to_string())).collect();
+        more.insert("size_format".into(), self.size_format.to_string());
+        more.insert("theme".into(), self.theme.to_string());
+        let config = Config { scale, own_title_bar: self.custom_title, regex: self.regex, whole_word: self.whole_word, case, more };
+        if let Err(e) = config.save() {
             self.status = format!("could not save settings: {e}");
         }
     }
@@ -1798,7 +2452,7 @@ impl App {
         for button in 0..3 {
             let x = w - (3 - button) * bw;
             let hovered = self.hover_button == Some(button as usize);
-            let ink = if hovered && button == 2 { WHITE } else { 0x3a3a3a };
+            let ink = if hovered && button == 2 { ON_ACCENT } else { 0x3a3a3a };
             if hovered {
                 self.cv.fill(x, 0, bw, th - 1, if button == 2 { 0xd93025 } else { 0xd2d2d2 });
             }
@@ -1942,6 +2596,9 @@ impl App {
         match key {
             Key::Char(ch) if ctrl => match ch.to_ascii_lowercase() {
                 'q' => return Ok(false),
+                'p' => self.act(Action::Options(0), time),
+                'r' => self.act(Action::ToggleRegex, time),
+                'b' => self.act(Action::ToggleWord, time),
                 '+' | '=' => self.act(Action::ZoomIn, time),
                 '-' => self.act(Action::ZoomOut, time),
                 '0' => self.act(Action::ZoomReset, time),
@@ -2018,6 +2675,7 @@ impl App {
                 };
                 self.search();
             }
+            Key::Sym(K_F1) => self.act(Action::Help(0), time),
             Key::Sym(K_F4) => self.act(Action::Edit, time),
             Key::Sym(K_F5) => self.reindex()?,
             _ => {}
@@ -2117,7 +2775,7 @@ impl App {
                     self.select_only(row);
                     self.collapse_on_release = None;
                     let [_, (path_x, path_w), ..] = self.columns();
-                    let on_path = x >= path_x && x < path_x + path_w;
+                    let on_path = self.flag(Flag::PathDoubleClick) && x >= path_x && x < path_x + path_w;
                     self.act(if on_path { Action::Reveal } else { Action::Open }, time);
                 }
                 self.last_click = (time, row);
@@ -2126,7 +2784,14 @@ impl App {
                 // Column header: sort by it, or flip the direction.
                 let hit = self.columns().iter().rposition(|&(cx, _)| x >= cx).unwrap_or(0);
                 let sort = [Sort::Name, Sort::Path, Sort::Size, Sort::Mtime][hit];
-                self.reverse = self.sort == sort && !self.reverse;
+                // A second click flips the order; the first uses the
+                // preferred direction for dates and sizes.
+                let descending_first = match sort {
+                    Sort::Mtime => self.flag(Flag::DateDescFirst),
+                    Sort::Size => self.flag(Flag::SizeDescFirst),
+                    _ => false,
+                };
+                self.reverse = if self.sort == sort { !self.reverse } else { descending_first };
                 self.sort = sort;
                 self.search();
             }
@@ -2136,6 +2801,12 @@ impl App {
 
     /// Pointer moved; returns true if something needs redrawing.
     fn motion(&mut self, x: i32, y: i32) -> bool {
+        let hover = self.row_at(y).filter(|_| self.flag(Flag::RowHover) && x < self.cv.w as i32 - self.bar_w());
+        let hover_changed = std::mem::replace(&mut self.hover_row, hover) != hover;
+        self.motion_inner(x, y) | hover_changed
+    }
+
+    fn motion_inner(&mut self, x: i32, y: i32) -> bool {
         if self.dragging_scrollbar {
             let before = self.top;
             self.scroll_to(y);
@@ -2280,7 +2951,7 @@ impl App {
             let (xa, xb) = (tx + self.text.width(&query[..a]), tx + self.text.width(&query[..b]));
             self.cv.clip = (xa.max(box_clip.0), xb.min(box_clip.1));
             self.cv.fill(xa, ty - u, xb - xa, self.text.height + 2 * u, SELECT);
-            self.text.draw(&mut self.cv, tx, ty, &query, i32::MAX / 2, WHITE);
+            self.text.draw(&mut self.cv, tx, ty, &query, i32::MAX / 2, ON_ACCENT);
             self.cv.clip = box_clip;
         }
         self.cv.fill(tx + caret, ty, u.max(1), self.text.height, TEXT);
@@ -2290,7 +2961,7 @@ impl App {
         let y = self.box_h();
         self.cv.fill(0, y, w, row_h, PANEL);
         self.cv.fill(0, y + row_h, w, 1, LINE);
-        let heads = [("Name", Sort::Name), ("Path", Sort::Path), ("Size", Sort::Size), ("Modified (UTC)", Sort::Mtime)];
+        let heads = [("Name", Sort::Name), ("Path", Sort::Path), ("Size", Sort::Size), ("Modified", Sort::Mtime)];
         for (i, ((label, sort), (x, cw))) in heads.into_iter().zip(cols).enumerate() {
             let mark = if self.sort != sort { "" } else if self.reverse { "  ▼" } else { "  ▲" };
             if i > 0 {
@@ -2308,9 +2979,13 @@ impl App {
             let Some(&id) = self.hits.get(self.top + row) else { break };
             let y = list_top + row as i32 * row_h;
             let selected = self.is_selected(self.top + row);
-            let (fg, dim) = if selected { (WHITE, WHITE) } else { (TEXT, DIM) };
+            let (fg, dim) = if selected { (ON_ACCENT, ON_ACCENT) } else { (TEXT, DIM) };
             if selected {
                 self.cv.fill(0, y, w - bar, row_h, SELECT);
+            } else if self.hover_row == Some(self.top + row) {
+                self.cv.fill(0, y, w - bar, row_h, 0xe6f0fc);
+            } else if self.flag(Flag::AltRows) && (self.top + row) % 2 == 1 {
+                self.cv.fill(0, y, w - bar, row_h, 0xf5f7f9);
             }
             let is_dir = self.index.is_dir(id);
             let name = String::from_utf8_lossy(self.index.name(id)).into_owned();
@@ -2328,11 +3003,11 @@ impl App {
             self.text.draw(&mut self.cv, name_x, ty, &name, cols[0].0 + cols[0].1 - pad - name_x, fg);
             self.text.draw(&mut self.cv, cols[1].0 + pad, ty, &parent, cols[1].1 - 2 * pad, dim);
             if !is_dir {
-                let size = format!("{} KB", group_digits(self.index.size(id).div_ceil(1024)));
+                let size = self.size_text(self.index.size(id));
                 let x = cols[2].0 + cols[2].1 - pad - self.text.width(&size);
                 self.text.draw(&mut self.cv, x, ty, &size, cols[2].1, fg);
             }
-            let (yr, mo, d, hh, mm) = ff_core::utc_civil(self.index.mtime(id));
+            let (yr, mo, d, hh, mm) = ff_core::local_civil(self.index.mtime(id));
             let date = format!("{yr:04}-{mo:02}-{d:02} {hh:02}:{mm:02}");
             self.text.draw(&mut self.cv, cols[3].0 + pad, ty, &date, cols[3].1 - pad, dim);
         }
@@ -2356,7 +3031,24 @@ impl App {
             if self.marks.len() > 1 {
                 n = format!("{} of {n}", group_digits(self.marks.len() as u64));
             }
-            format!("{n} objects      F2 show: {kind}      F3 case: {case}      F5 reindex      Right-click for actions")
+            let mut modes = String::new();
+            if self.regex {
+                modes += "      Ctrl+R regex: on";
+            }
+            if self.whole_word {
+                modes += "      Ctrl+B whole words: on";
+            }
+            match &self.query_error {
+                // A filter or expression that makes no sense: say so.
+                Some(problem) => format!("{n} objects      {problem}"),
+                None if self.flag(Flag::SelectedInStatus) && self.sel < self.hits.len() => {
+                    let id = self.hits[self.sel];
+                    let (yr, mo, d, hh, mm) = ff_core::local_civil(self.index.mtime(id));
+                    let size = if self.index.is_dir(id) { "folder".to_string() } else { format!("{} bytes", group_digits(self.index.size(id))) };
+                    format!("{n} objects      {}      {size}      {yr:04}-{mo:02}-{d:02} {hh:02}:{mm:02}", self.index.path(id).display())
+                }
+                None => format!("{n} objects      F2 show: {kind}      F3 case: {case}{modes}      F1 help      Right-click for actions"),
+            }
         } else {
             self.status.clone()
         };

@@ -89,7 +89,13 @@ impl Index {
 
     /// Directories skipped at build time.
     pub fn excludes(&self) -> impl Iterator<Item = PathBuf> + '_ {
-        self.excludes.iter().map(|e| OsString::from_vec(e.clone()).into())
+        let folders = self.excludes.iter().filter(|e| e.as_slice() != crate::walk::HIDDEN_MARK);
+        folders.map(|e| OsString::from_vec(e.clone()).into())
+    }
+
+    /// True if names starting with a dot were left out when building.
+    pub fn skips_hidden(&self) -> bool {
+        self.excludes.iter().any(|e| e.as_slice() == crate::walk::HIDDEN_MARK)
     }
 
     /// Bytes of heap used by the index.
@@ -151,6 +157,18 @@ impl Index {
         self.mtime.push(mtime);
         self.flags.push(flags);
         id as u32
+    }
+
+    /// Adds all of `other`'s entries (its roots become extra roots here).
+    pub fn append(&mut self, other: &Index) {
+        let shift = self.len() as u32;
+        for id in 0..other.len() {
+            let parent = match other.parent[id] {
+                NO_PARENT => NO_PARENT,
+                p => p + shift,
+            };
+            self.push(other.name(id as u32), parent, other.flags[id], other.size[id], other.mtime[id]);
+        }
     }
 
     /// Drops every entry whose `gone` flag is set, renumbering the rest.

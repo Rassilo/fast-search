@@ -8,3 +8,6 @@ license.workspace = true
 [lib]
 # rlib for Rust users, staticlib (libff_core.a + include/ff.h) for C users.
 crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+regex-lite = "0.1.9"

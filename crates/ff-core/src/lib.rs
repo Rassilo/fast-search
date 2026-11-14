@@ -25,10 +25,13 @@ pub mod ffi;
 mod index;
 pub mod live;
 mod query;
+pub mod rawfs;
+pub mod time;
 mod walk;
 
 pub use index::{FLAG_DIR, FLAG_SYMLINK, Index, NO_PARENT};
-pub use query::{CaseMode, Kind, Query, SearchOptions, Sort};
+pub use query::{CaseMode, Kind, Query, QueryOptions, SearchOptions, Sort};
+pub use time::{local_civil, utc_civil};
 pub use walk::BuildOptions;
 
 use std::path::PathBuf;
@@ -51,23 +54,6 @@ pub fn default_db_path() -> Option<PathBuf> {
         None => PathBuf::from(var("HOME")?).join(".cache"),
     };
     Some(cache.join("ff/index.db"))
-}
-
-/// Unix seconds -> (year, month, day, hour, minute) in UTC.
-pub fn utc_civil(secs: i64) -> (i64, i64, i64, i64, i64) {
-    let days = secs.div_euclid(86400);
-    let rem = secs.rem_euclid(86400);
-    // Civil-from-days (Howard Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + (m <= 2) as i64;
-    (y, m, d, rem / 3600, rem % 3600 / 60)
 }
 
 /// 1234567 -> "1,234,567".

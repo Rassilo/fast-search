@@ -152,8 +152,8 @@ fn size_text(bytes: u64) -> String {
 }
 
 fn time_text(secs: i64) -> String {
-    let (y, mo, d, h, mi) = crate::utc_civil(secs);
-    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02} UTC")
+    let (y, mo, d, h, mi) = crate::local_civil(secs);
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}")
 }
 
 /// Looks up a numeric id in /etc/passwd or /etc/group (`name:x:id:...`).

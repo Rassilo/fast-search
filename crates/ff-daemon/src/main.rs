@@ -7,14 +7,14 @@
 
 mod sys;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::{OnceLock, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use ff_core::live::LiveIndex;
@@ -27,12 +27,22 @@ USAGE:
   ffd [OPTIONS] [ROOT...]             index ROOTs (default /) and follow changes
   ffd --install-service GROUP         install and start ffd as a systemd service
   ffd --uninstall-service             stop and remove that service
+  ffd --configure [--skip DEV]... [--nolive DEV]... [--device DEV]...
+                  [--manual [--include DEV]...] [--exclude DIR]... [--no-hidden]
+                                      save per-drive settings and restart
+                                      (--manual: index only included drives)
 
 OPTIONS:
   -g, --group NAME    group allowed to read the index (default: root only)
   -x, --exclude DIR   skip a directory (repeatable)
   -o, --output FILE   where to publish the index (default /run/ff/index.db)
   -i, --interval SEC  how often to publish after changes (default 2)
+      --skip DEV      do not index this mounted drive (e.g. /dev/sdb1)
+      --nolive DEV    index this drive but do not follow its changes
+      --device DEV    index this ext2/3/4 or NTFS drive directly while it
+                      is not mounted
+  Drive settings are also read from /etc/ffd.conf. Drives being mounted,
+  unmounted or plugged in are noticed and the index follows.
   -h, --help
 
 Everyone in GROUP can search the names of ALL files on the system,
@@ -69,6 +79,118 @@ struct Config {
     output: PathBuf,
     group: Option<u32>,
     interval: Duration,
+    drives: Drives,
+}
+
+/// Per-drive settings, by device path such as `/dev/sdb1`. Kept in
+/// /etc/ffd.conf, one `skip|nolive|device <path>` per line.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct Drives {
+    /// Mounted drives that are not indexed at all.
+    skip: Vec<String>,
+    /// Mounted drives that are indexed but not watched for changes.
+    nolive: Vec<String>,
+    /// Drives to index by reading them directly while they are not mounted.
+    devices: Vec<String>,
+    /// Newly mounted drives are not indexed by themselves: only those in
+    /// `include` are.
+    manual: bool,
+    include: Vec<String>,
+    /// Folders left out of the index, and whether hidden names are.
+    excludes: Vec<String>,
+    no_hidden: bool,
+}
+
+const CONFIG_FILE: &str = "/etc/ffd.conf";
+
+impl Drives {
+    fn parse(text: &str) -> Drives {
+        let mut drives = Drives::default();
+        for line in text.lines() {
+            // A folder path may contain spaces: it is the rest of the line.
+            if let Some(folder) = line.strip_prefix("exclude ").map(str::trim).filter(|f| valid_folder(f)) {
+                drives.excludes.push(folder.to_string());
+                continue;
+            }
+            if line.trim() == "nohidden" {
+                drives.no_hidden = true;
+                continue;
+            }
+            let mut words = line.split_whitespace();
+            let list = match words.next() {
+                Some("skip") => &mut drives.skip,
+                Some("nolive") => &mut drives.nolive,
+                Some("device") => &mut drives.devices,
+                Some("include") => &mut drives.include,
+                Some("manual") => {
+                    drives.manual = true;
+                    continue;
+                }
+                _ => continue, // comments, blank lines, things from the future
+            };
+            list.extend(words.next().filter(|d| valid_device(d)).map(String::from));
+        }
+        drives
+    }
+
+    fn to_text(&self) -> String {
+        let mut text = String::from("# Fast search daemon: per-drive settings (written by ffd --configure).\n");
+        if self.manual {
+            text += "manual\n";
+        }
+        if self.no_hidden {
+            text += "nohidden\n";
+        }
+        for folder in &self.excludes {
+            text += &format!("exclude {folder}\n");
+        }
+        let lists = [("skip", &self.skip), ("nolive", &self.nolive), ("device", &self.devices), ("include", &self.include)];
+        for (key, list) in lists {
+            for device in list {
+                text += &format!("{key} {device}\n");
+            }
+        }
+        text
+    }
+}
+
+/// A folder path we are willing to store: absolute, on one line.
+fn valid_folder(path: &str) -> bool {
+    path.starts_with('/') && !path.chars().any(char::is_control)
+}
+
+/// A device path we are willing to store and act on.
+fn valid_device(path: &str) -> bool {
+    path.starts_with("/dev/") && path.len() > 5 && path.bytes().all(|b| b.is_ascii_alphanumeric() || b"/_.-".contains(&b))
+}
+
+/// What to index and watch, given the settings and what is mounted now.
+#[derive(Debug, Default, PartialEq)]
+struct Plan {
+    /// Mount points left out of the walk (their drive is skipped).
+    excludes: Vec<PathBuf>,
+    /// Filesystems to watch for changes.
+    watch: Vec<Mount>,
+    /// Configured drives that are present and not mounted: read directly.
+    raw: Vec<String>,
+}
+
+fn plan(mounts: Vec<Mount>, drives: &Drives, present: impl Fn(&str) -> bool) -> Plan {
+    let mut plan = Plan::default();
+    for device in &drives.devices {
+        if !mounts.iter().any(|m| &m.source == device) && present(device) {
+            plan.raw.push(device.clone());
+        }
+    }
+    for mount in mounts {
+        let left_out = drives.manual && !drives.include.contains(&mount.source);
+        if left_out || drives.skip.contains(&mount.source) {
+            plan.excludes.push(mount.point);
+        } else if !drives.nolive.contains(&mount.source) {
+            plan.watch.push(mount);
+        }
+    }
+    plan
 }
 
 fn main() -> ExitCode {
@@ -99,6 +221,7 @@ fn run() -> Result<(), String> {
         output: ff_core::SYSTEM_DB.into(),
         group: None,
         interval: Duration::from_secs(2),
+        drives: Drives::parse(&fs::read_to_string(CONFIG_FILE).unwrap_or_default()),
     };
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
@@ -110,6 +233,18 @@ fn run() -> Result<(), String> {
             }
             Some("--install-service") => return install_service(&value("--install-service")?.to_string_lossy()),
             Some("--uninstall-service") => return uninstall_service(),
+            Some("--configure") => return configure(args.map(|a| a.to_string_lossy().into_owned()).collect()),
+            Some(f @ ("--skip" | "--nolive" | "--device")) => {
+                let device = value(f)?.to_string_lossy().into_owned();
+                if !valid_device(&device) {
+                    return Err(format!("{f}: {device} is not a device path like /dev/sdb1"));
+                }
+                match f {
+                    "--skip" => cfg.drives.skip.push(device),
+                    "--nolive" => cfg.drives.nolive.push(device),
+                    _ => cfg.drives.devices.push(device),
+                }
+            }
             Some(f @ ("-g" | "--group")) => cfg.group = Some(group_id(&value(f)?.to_string_lossy())?),
             Some(f @ ("-x" | "--exclude")) => excludes.push(PathBuf::from(value(f)?)),
             Some(f @ ("-o" | "--output")) => cfg.output = value(f)?.into(),
@@ -125,7 +260,18 @@ fn run() -> Result<(), String> {
         cfg.opts = BuildOptions::new(roots);
     }
     cfg.opts.excludes.extend(excludes);
+    cfg.opts.excludes.extend(cfg.drives.excludes.iter().map(PathBuf::from));
+    cfg.opts.skip_hidden = cfg.drives.no_hidden;
     serve(&cfg)
+}
+
+/// The mount table as (watchable mounts, settings applied): the state
+/// whose changes mean a drive came or went.
+fn current_plan(cfg: &Config) -> Result<Plan, String> {
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").map_err(|e| format!("/proc/self/mountinfo: {e}"))?;
+    let roots: Vec<PathBuf> = cfg.opts.roots.iter().filter_map(|r| fs::canonicalize(r).ok()).collect();
+    let mounts = watchable_mounts(&mountinfo, &roots, &cfg.opts.excludes);
+    Ok(plan(mounts, &cfg.drives, |device| Path::new(device).exists()))
 }
 
 fn serve(cfg: &Config) -> Result<(), String> {
@@ -148,26 +294,75 @@ fn serve(cfg: &Config) -> Result<(), String> {
         log("could not get a private mount table; btrfs subvolume fallback disabled");
     }
 
-    // Start listening before the scan so nothing that changes during it
-    // is missed; those events are applied once the scan is done.
-    let mounts = watch_filesystems(&group, cfg, private_mounts)?;
+    // Open folders of the watched filesystems, shared with the thread that
+    // turns events into paths; replaced when drives come and go.
+    let mount_dirs = Arc::new(Mutex::new(Vec::new()));
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || read_events(group, mounts, tx));
+    {
+        let (group, mount_dirs) = (group.try_clone().map_err(|e| e.to_string())?, mount_dirs.clone());
+        std::thread::spawn(move || read_events(group, mount_dirs, tx));
+    }
 
-    let scan = |why: &str| -> Result<LiveIndex, String> {
+    // Drives read directly are remembered: an unmounted drive does not
+    // change, and reading a large one takes a while.
+    let mut raw_cache: HashMap<String, Index> = HashMap::new();
+    let mut scan = |why: &str, plan: &Plan| -> Result<LiveIndex, String> {
         let start = Instant::now();
-        let index = Index::build(&cfg.opts).map_err(|e| e.to_string())?;
+        // Start watching before the scan so nothing that changes during
+        // it is missed; those events are applied once the scan is done.
+        *mount_dirs.lock().unwrap() = watch_filesystems(&group, &plan.watch, private_mounts);
+        let mut opts = BuildOptions::new(cfg.opts.roots.clone());
+        opts.excludes = cfg.opts.excludes.iter().chain(&plan.excludes).cloned().collect();
+        opts.skip_hidden = cfg.opts.skip_hidden;
+        let mut index = Index::build(&opts).map_err(|e| e.to_string())?;
+        raw_cache.retain(|device, _| plan.raw.contains(device));
+        for device in &plan.raw {
+            if !raw_cache.contains_key(device) {
+                let read_start = Instant::now();
+                match ff_core::rawfs::scan(Path::new(device), device.as_bytes()) {
+                    Ok(read) => {
+                        log(format!("read {device} directly: {} entries in {:.2}s", read.len(), read_start.elapsed().as_secs_f64()));
+                        raw_cache.insert(device.clone(), read);
+                    }
+                    Err(e) => log(format!("cannot read {device} directly: {e}")),
+                }
+            }
+            if let Some(read) = raw_cache.get(device) {
+                index.append(read);
+            }
+        }
+        for skipped in &plan.excludes {
+            log(format!("not indexing {} (drive is switched off)", skipped.display()));
+        }
         log(format!("{why}: {} entries in {:.2}s", index.len(), start.elapsed().as_secs_f64()));
         Ok(LiveIndex::new(index))
     };
-    let mut live = scan("indexed")?;
+
+    let mut current = current_plan(cfg)?;
+    let mut live = scan("indexed", &current)?;
     publish(cfg, live.index())?;
     log(format!("publishing to {}", cfg.output.display()));
 
     let own_dir = cfg.output.parent().map(|p| p.as_os_str().as_bytes().to_vec());
     loop {
-        // Sleep until something happens, then gather a batch.
-        let first = rx.recv().map_err(|_| "the event reader stopped".to_string())?;
+        // Sleep until a file changes, or look at the drives every few seconds.
+        let first = match rx.recv_timeout(Duration::from_secs(3)) {
+            Ok(msg) => Some(msg),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err("the event reader stopped".into()),
+        };
+        // A drive was mounted, unmounted, plugged in or removed: start over.
+        let now = current_plan(cfg)?;
+        if now != current {
+            current = now;
+            live = scan("drives changed, rescanned", &current)?;
+            if let Err(e) = publish(cfg, live.index()) {
+                log(e);
+            }
+            continue;
+        }
+        let Some(first) = first else { continue };
+        // Gather a batch of changes.
         std::thread::sleep(cfg.interval);
         let mut changes = HashSet::new();
         let mut overflow = false;
@@ -182,7 +377,7 @@ fn serve(cfg: &Config) -> Result<(), String> {
             }
         }
         let changed = if overflow {
-            live = scan("events were dropped, rescanned")?;
+            live = scan("events were dropped, rescanned", &current)?;
             true
         } else {
             live.apply(&changes)
@@ -193,6 +388,42 @@ fn serve(cfg: &Config) -> Result<(), String> {
             }
         }
     }
+}
+
+/// `--configure`: saves per-drive settings to /etc/ffd.conf and restarts
+/// the service so they take effect. Needs root.
+fn configure(args: Vec<String>) -> Result<(), String> {
+    let mut drives = Drives::default();
+    let mut args = args.into_iter();
+    while let Some(flag) = args.next() {
+        if flag == "--manual" {
+            drives.manual = true;
+            continue;
+        }
+        if flag == "--no-hidden" {
+            drives.no_hidden = true;
+            continue;
+        }
+        if flag == "--exclude" {
+            let folder = args.next().filter(|f| valid_folder(f)).ok_or("--exclude needs an absolute folder path")?;
+            drives.excludes.push(folder);
+            continue;
+        }
+        let device = args.next().filter(|d| valid_device(d)).ok_or(format!("{flag} needs a device path like /dev/sdb1"))?;
+        match flag.as_str() {
+            "--include" => drives.include.push(device),
+            "--skip" => drives.skip.push(device),
+            "--nolive" => drives.nolive.push(device),
+            "--device" => drives.devices.push(device),
+            _ => return Err(format!("--configure: unknown setting {flag}")),
+        }
+    }
+    fs::write(CONFIG_FILE, drives.to_text()).map_err(|e| format!("{CONFIG_FILE}: {e} (run this with sudo)"))?;
+    fs::set_permissions(CONFIG_FILE, fs::Permissions::from_mode(0o644)).map_err(|e| format!("{CONFIG_FILE}: {e}"))?;
+    println!("saved {CONFIG_FILE}");
+    // Only restart a service that is running; ignore one that is not installed.
+    let _ = systemctl(&["try-restart", "ffd"]);
+    Ok(())
 }
 
 fn command_ok(program: &str, args: &[&str]) -> bool {
@@ -256,11 +487,9 @@ fn watchable_mounts(mountinfo: &str, roots: &[PathBuf], excludes: &[PathBuf]) ->
     mounts
 }
 
-/// Puts a filesystem-wide watch on every real filesystem under the roots.
-/// Returns an open directory per filesystem, used to resolve file handles.
-fn watch_filesystems(group: &File, cfg: &Config, private_mounts: bool) -> Result<Vec<File>, String> {
-    let mountinfo = fs::read_to_string("/proc/self/mountinfo").map_err(|e| format!("/proc/self/mountinfo: {e}"))?;
-    let roots: Vec<PathBuf> = cfg.opts.roots.iter().filter_map(|r| fs::canonicalize(r).ok()).collect();
+/// Puts a filesystem-wide watch on each of `mounts`. Returns an open
+/// folder per filesystem, used to turn file handles into paths.
+fn watch_filesystems(group: &File, mounts: &[Mount], private_mounts: bool) -> Vec<File> {
     let mask = sys::FAN_CREATE
         | sys::FAN_DELETE
         | sys::FAN_MOVED_FROM
@@ -269,9 +498,9 @@ fn watch_filesystems(group: &File, cfg: &Config, private_mounts: bool) -> Result
         | sys::FAN_ONDIR;
     let mut dirs = Vec::new();
     // Per device: did any of its mounts accept a watch?
-    let mut devices: Vec<(String, String, bool)> = Vec::new();
-    for Mount { point, fstype, source } in watchable_mounts(&mountinfo, &roots, &cfg.opts.excludes) {
-        let watched = match sys::fanotify_mark_filesystem(group, mask, &point) {
+    let mut devices: Vec<(&str, &str, bool)> = Vec::new();
+    for Mount { point, fstype, source } in mounts {
+        let watched = match sys::fanotify_mark_filesystem(group, mask, point) {
             Ok(()) => {
                 log(format!("watching {} ({fstype})", point.display()));
                 true
@@ -285,7 +514,7 @@ fn watch_filesystems(group: &File, cfg: &Config, private_mounts: bool) -> Result
             Some(device) => device.2 |= watched,
             None => devices.push((source, fstype, watched)),
         }
-        if let Ok(dir) = File::open(&point) {
+        if let Ok(dir) = File::open(point) {
             dirs.push(dir);
         }
     }
@@ -293,16 +522,13 @@ fn watch_filesystems(group: &File, cfg: &Config, private_mounts: bool) -> Result
         if *watched {
             continue;
         }
-        if fstype == "btrfs" && private_mounts {
+        if *fstype == "btrfs" && private_mounts {
             watch_top_level(group, mask, source, n);
         } else {
             log(format!("{source} ({fstype}) is NOT watched; changes there will be missed"));
         }
     }
-    if dirs.is_empty() {
-        return Err("found no filesystem to watch".into());
-    }
-    Ok(dirs)
+    dirs
 }
 
 /// btrfs only accepts a filesystem-wide watch on its top-level volume, and
@@ -311,6 +537,10 @@ fn watch_filesystems(group: &File, cfg: &Config, private_mounts: bool) -> Result
 /// covers every subvolume of the device.
 fn watch_top_level(group: &File, mask: u64, source: &str, n: usize) {
     let dir = PathBuf::from(format!("/run/ffd-mounts/{n}"));
+    // Already mounted by an earlier scan: the watch is still in place.
+    if fs::read_to_string("/proc/self/mountinfo").is_ok_and(|m| m.contains(&format!(" {} ", dir.display()))) {
+        return;
+    }
     let mounted = fs::create_dir_all(&dir).is_ok()
         && command_ok("mount", &["-t", "btrfs", "-o", "subvolid=5,noatime", source, &dir.to_string_lossy()]);
     if !mounted {
@@ -409,7 +639,7 @@ fn changed_entry(dir: Vec<u8>, name: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
 /// Reads fanotify events forever, turning each into a message. Runs on its
 /// own thread so directory handles are resolved to paths promptly, before
 /// the directory can go away.
-fn read_events(mut group: File, mounts: Vec<File>, tx: mpsc::Sender<Msg>) {
+fn read_events(mut group: File, mounts: Arc<Mutex<Vec<File>>>, tx: mpsc::Sender<Msg>) {
     let mut buf = vec![0u8; 256 * 1024];
     loop {
         let n = match group.read(&mut buf) {
@@ -426,7 +656,7 @@ fn read_events(mut group: File, mounts: Vec<File>, tx: mpsc::Sender<Msg>) {
                 Event::Entry { handle, name } => {
                     // No path: the directory is already gone, or it is
                     // not under a mount we index.
-                    let Some(dir) = mounts.iter().find_map(|m| handle_path(m, handle)) else { continue };
+                    let Some(dir) = mounts.lock().unwrap().iter().find_map(|m| handle_path(m, handle)) else { continue };
                     let Some((dir, name)) = changed_entry(dir.into_os_string().into_vec(), name) else { continue };
                     Msg::Changed(dir, name)
                 }
@@ -644,5 +874,55 @@ malformed line without the separator
         // Without the default excludes, /run's tmpfs mounts are included.
         let none = watchable_mounts(MOUNTINFO, &["/run".into()], &[]);
         assert_eq!(points(&none), ["/run", "/", "/run/user/1000"]);
+    }
+
+    #[test]
+    fn drive_settings_round_trip() {
+        let text = "# comment\nskip /dev/sdb1\nnolive /dev/sdc1\ndevice /dev/nvme0n1p2\nskip not-a-device\nfuture thing\nskip /dev/bad;rm\n";
+        let drives = Drives::parse(text);
+        assert_eq!(drives.skip, ["/dev/sdb1"]);
+        assert_eq!(drives.nolive, ["/dev/sdc1"]);
+        assert_eq!(drives.devices, ["/dev/nvme0n1p2"]);
+        assert_eq!(Drives::parse(&drives.to_text()), drives);
+        let more = Drives::parse("nohidden\nexclude /home/me/My Videos\nexclude relative/path\n");
+        assert_eq!((more.no_hidden, &more.excludes[..]), (true, &["/home/me/My Videos".to_string()][..]));
+        assert_eq!(Drives::parse(&more.to_text()), more);
+        assert!(valid_device("/dev/mapper/vg-home"));
+        assert!(!valid_device("/dev/"));
+        assert!(!valid_device("/etc/passwd"));
+        assert!(!valid_device("/dev/sd a"));
+    }
+
+    #[test]
+    fn plans_what_to_index_and_watch() {
+        let mount = |point: &str, source: &str| Mount { point: point.into(), fstype: "ext4".into(), source: source.into() };
+        let mounts = || vec![mount("/", "/dev/sda1"), mount("/data", "/dev/sdb1"), mount("/media/usb", "/dev/sdc1")];
+        let drives = Drives {
+            skip: vec!["/dev/sdb1".into()],
+            nolive: vec!["/dev/sdc1".into()],
+            devices: vec!["/dev/sdd1".into(), "/dev/sde1".into(), "/dev/sdc1".into()],
+            ..Default::default()
+        };
+        // sdd1 is plugged in and not mounted; sde1 is absent; sdc1 is mounted.
+        let planned = plan(mounts(), &drives, |device| device != "/dev/sde1");
+        assert_eq!(planned.excludes, [PathBuf::from("/data")]);
+        assert_eq!(planned.watch, [mount("/", "/dev/sda1")]);
+        assert_eq!(planned.raw, ["/dev/sdd1"]);
+
+        // Unplugging sdd1 or unmounting /data changes the plan, which is
+        // what triggers a rescan.
+        assert_ne!(plan(mounts(), &drives, |_| false), planned);
+        let mut fewer = mounts();
+        fewer.remove(1);
+        assert_ne!(plan(fewer, &drives, |device| device != "/dev/sde1"), planned);
+        // Manual mode: only included drives are indexed, even when mounted.
+        let manual = Drives { manual: true, include: vec!["/dev/sda1".into()], ..Default::default() };
+        let picked = plan(mounts(), &manual, |_| true);
+        assert_eq!(picked.watch, [mount("/", "/dev/sda1")]);
+        assert_eq!(picked.excludes, [PathBuf::from("/data"), PathBuf::from("/media/usb")]);
+        assert_eq!(Drives::parse(&manual.to_text()), manual);
+        // No settings: everything mounted is indexed and watched.
+        let plain = plan(mounts(), &Drives::default(), |_| true);
+        assert_eq!((plain.excludes.len(), plain.watch.len(), plain.raw.len()), (0, 3, 0));
     }
 }

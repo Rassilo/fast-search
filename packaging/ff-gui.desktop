@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Fast search
+Comment=Find files instantly by name
+Exec=ff-gui
+Icon=ff-gui
+Terminal=false
+Categories=Utility;FileTools;
+StartupWMClass=ff-gui

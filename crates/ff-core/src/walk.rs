@@ -17,7 +17,13 @@ pub struct BuildOptions {
     pub excludes: Vec<PathBuf>,
     /// Walker threads; 0 picks a default from the CPU count.
     pub threads: usize,
+    /// Leave out files and folders whose name starts with a dot.
+    pub skip_hidden: bool,
 }
+
+/// How "hidden names are left out" is recorded among an index's excludes,
+/// so that refreshing the index keeps the choice.
+pub(crate) const HIDDEN_MARK: &[u8] = b"<hidden>";
 
 impl BuildOptions {
     /// Indexes `roots`, skipping the kernel pseudo-filesystems and btrfs
@@ -27,6 +33,7 @@ impl BuildOptions {
             roots: roots.into_iter().map(Into::into).collect(),
             excludes: ["/proc", "/sys", "/dev", "/run", "/.snapshots"].map(PathBuf::from).into(),
             threads: 0,
+            skip_hidden: false,
         }
     }
 
@@ -36,7 +43,13 @@ impl BuildOptions {
         if old.is_empty() {
             return Self::new(["/"]);
         }
-        let mut opts = Self::new(old.roots().map(|r| old.path(r)));
+        // Roots that are not folders came from a device read directly
+        // (`ff index --device`); those are not walked.
+        let mut opts = Self::new(old.roots().map(|r| old.path(r)).filter(|p| p.is_dir()));
+        opts.skip_hidden = old.skips_hidden();
+        if opts.roots.is_empty() {
+            return Self::new(["/"]);
+        }
         opts.excludes = old.excludes().collect();
         opts
     }
@@ -88,6 +101,9 @@ impl Index {
             0 => thread::available_parallelism().map_or(4, |n| n.get()).min(16),
             n => n,
         };
+        if opts.skip_hidden {
+            index.excludes.push(HIDDEN_MARK.to_vec());
+        }
         let excludes = std::mem::take(&mut index.excludes);
         let index = Mutex::new(index);
         let queue = (Mutex::new(Queue { stack, active: 0 }), Condvar::new());
@@ -127,7 +143,11 @@ fn worker(queue: &(Mutex<Queue>, Condvar), index: &Mutex<Index>, excludes: &[Vec
         };
 
         if let Ok(rd) = fs::read_dir(&dir) {
+            let skip_hidden = excludes.iter().any(|x| x == HIDDEN_MARK);
             for entry in rd.flatten() {
+                if skip_hidden && entry.file_name().as_bytes().starts_with(b".") {
+                    continue;
+                }
                 let (flags, size, mtime) = match entry.metadata() {
                     Ok(md) => (type_flags(md.file_type()), md.size(), md.mtime()),
                     Err(_) => (entry.file_type().map_or(0, type_flags), 0, 0),
@@ -151,6 +171,7 @@ fn worker(queue: &(Mutex<Queue>, Condvar), index: &Mutex<Index>, excludes: &[Vec
             .drain(..)
             .map(|(name, id)| (dir.join(name), id))
             .filter(|(p, _)| !excludes.iter().any(|x| x == p.as_os_str().as_bytes()))
+            .filter(|(p, _)| !in_trash(p.as_os_str().as_bytes()))
             .collect();
 
         let mut q = lock.lock().unwrap();
@@ -159,6 +180,18 @@ fn worker(queue: &(Mutex<Queue>, Condvar), index: &Mutex<Index>, excludes: &[Vec
         drop(q);
         cond.notify_all();
     }
+}
+
+/// True if `path` is a desktop trash folder or inside one: the user's
+/// `~/.local/share/Trash`, or a drive's `.Trash` / `.Trash-<uid>`. Trashed
+/// files are never indexed (the folder itself is listed, not its content).
+pub(crate) fn in_trash(path: &[u8]) -> bool {
+    let parts: Vec<&[u8]> = path.split(|&b| b == b'/').collect();
+    parts.iter().enumerate().any(|(i, part)| {
+        *part == b".Trash"
+            || part.starts_with(b".Trash-")
+            || (*part == b"Trash" && i >= 2 && parts[i - 1] == b"share" && parts[i - 2] == b".local")
+    })
 }
 
 pub(crate) fn type_flags(ft: fs::FileType) -> u8 {

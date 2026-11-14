@@ -43,6 +43,7 @@ pub const K_PAGE_DOWN: u32 = 0xff56;
 pub const K_END: u32 = 0xff57;
 pub const K_MENU: u32 = 0xff67;
 pub const K_KP_ENTER: u32 = 0xff8d;
+pub const K_F1: u32 = 0xffbe;
 pub const K_F2: u32 = 0xffbf;
 pub const K_F3: u32 = 0xffc0;
 pub const K_F4: u32 = 0xffc1;

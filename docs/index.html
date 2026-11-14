@@ -136,7 +136,7 @@
 </div>
 
 <h2>Search syntax</h2>
-<p class="lead">Terms are separated by spaces and must all match. Matching ignores case unless you type an uppercase letter.</p>
+<p class="lead">Words are separated by spaces and must all match. Matching ignores case unless you type an uppercase letter. Press F1 in the window for this sheet.</p>
 <div class="table-scroll">
 <table>
   <tr><th>You type</th><th>You get</th></tr>
@@ -144,7 +144,24 @@
   <tr><td><code>*.pdf</code></td><td>names matching the wildcard (<code>*</code> any run, <code>?</code> one character)</td></tr>
   <tr><td><code>src/main</code></td><td>a term with <code>/</code> is matched against the full path</td></tr>
   <tr><td><code>!draft</code></td><td>entries that do not match "draft"</td></tr>
-  <tr><td><code>report *.pdf !draft</code></td><td>PDF files with "report" in the name, excluding drafts</td></tr>
+  <tr><td><code>"my file"</code></td><td>quotes keep a space inside a term</td></tr>
+  <tr><td><code>^IMG_\d+\.jpe?g$</code></td><td>regular expressions, switched on with Ctrl+R (<code>-R</code>)</td></tr>
+  <tr><td><code>port</code> as a whole word</td><td>Ctrl+B (<code>-w</code>): finds "port 80" but not "report"</td></tr>
+</table>
+</div>
+
+<h2>Filters</h2>
+<p class="lead">Narrow the results by extension, size or date, mixed freely with words.</p>
+<div class="table-scroll">
+<table>
+  <tr><th>Filter</th><th>Meaning</th></tr>
+  <tr><td><code>ext:pdf</code></td><td>by extension; several <code>ext:jpg;png;gif</code>; compound <code>ext:tar.gz</code></td></tr>
+  <tr><td><code>size:&gt;100M</code></td><td>larger than 100 MB; also <code>&gt;=</code> <code>&lt;</code> <code>&lt;=</code></td></tr>
+  <tr><td><code>size:10M..1G</code></td><td>a size range</td></tr>
+  <tr><td><code>modified:today</code></td><td>changed since midnight; also <code>yesterday</code>, <code>3h</code>, <code>7d</code></td></tr>
+  <tr><td><code>modified:2026-10-24</code></td><td>changed on that day</td></tr>
+  <tr><td><code>modified:2026-01-01..2026-06-30</code></td><td>changed between two dates</td></tr>
+  <tr><td><code>invoice ext:pdf size:&gt;1M dm:30d</code></td><td>big PDF invoices from the last month</td></tr>
 </table>
 </div>
 
@@ -163,6 +180,7 @@ ff -p notes.txt                   <span class="c"># print its properties</span><
   <div class="arrow"><b>→</b>publishes<br><code>/run/ff/index.db</code></div>
   <div class="box"><small>Runs as you</small><h3><code>ff</code> and <code>ff-gui</code></h3><p>Read the published index. They never talk to the daemon and never need root. The window reloads within about three seconds of a change.</p></div>
 </div>
+<p class="lead"><b>Drives.</b> The daemon follows drives being mounted, unmounted and plugged in. Under <b>Options → Drives…</b> you choose which drives are indexed and which are followed live. Unmounted ext2/3/4 and NTFS drives can be indexed as well: the daemon reads their file tables directly, without mounting them.</p>
 <p class="note"><strong>Privacy.</strong> The daemon sees every file. Everyone in the group you allow to read the index can search the names of all files on the system, including files in folders they cannot open. Only names, sizes and dates are exposed, never contents.</p>
 <p class="note"><strong>Status.</strong> The daemon is new and supports x86-64 only. It has been run on btrfs with subvolumes (the openSUSE layout), where it watches the device through a private mount of its top level.</p>
 
@@ -213,7 +231,7 @@ packaging/build-packages.sh</code></pre>
 <div class="cards">
   <div class="card"><h3>Linux only</h3><p>The window needs an X server; XWayland on a Wayland desktop works.</p></div>
   <div class="card"><h3>Names, not contents</h3><p>It finds files by name and path. It does not search inside files.</p></div>
-  <div class="card"><h3>Times in UTC</h3><p>Dates are shown in UTC for now, and complex scripts such as Arabic are drawn unshaped.</p></div>
+  <div class="card"><h3>Plain text drawing</h3><p>Complex scripts such as Arabic are drawn unshaped, and file icons are built in rather than taken from your theme.</p></div>
 </div>
 
 <footer>

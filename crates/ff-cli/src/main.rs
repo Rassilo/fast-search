@@ -22,15 +22,25 @@ TERMS:
   src/main   contains '/': matched against the full path
   '!foo'     must not match
 
+FILTERS (mix them with terms):
+  ext:pdf            by extension; several: ext:jpg;png   compound: ext:tar.gz
+  size:'>100M'       by size, also >= < <= and ranges: size:10M..1G
+  modified:today     by date: yesterday, 3h, 7d, 2026-10-24,
+                     2026-01-01..2026-06-30   (dm: for short)
+
 SEARCH OPTIONS:
   -f, --files        files only
   -d, --dirs         directories only
   -c, --case         case-sensitive
   -i, --ignore-case  case-insensitive
+  -R, --regex        terms are regular expressions, e.g. '^img_[0-9]+[.]jpe?g$'
+  -w, --word         terms match whole words only
+      --match-path   match every term against the full path
+      --wildcards-anywhere   a wildcard may match part of the name
   -n, --limit N      at most N results
   -s, --sort KEY     name | path | size | mtime
   -r, --reverse      reverse the order
-  -l, --long         show size and modification time (UTC)
+  -l, --long         show size and modification time
   -0, --null         separate results with NUL instead of newline
       --count        print only the number of matches
   -o, --open         open the first result with its default application
@@ -40,7 +50,11 @@ SEARCH OPTIONS:
 
 INDEX OPTIONS:
   -x, --exclude DIR  skip a directory (repeatable)
+      --no-hidden    skip files and folders whose name starts with a dot
   -j, --threads N    walker threads
+      --device DEV   also index an ext2/3/4 or NTFS partition (or disk image)
+                     directly, without mounting it (repeatable; a real
+                     partition needs root). Alone, it indexes only that.
   With no ROOT, the previous roots and excludes are reused (first run: /).
 
 GENERAL:
@@ -66,6 +80,10 @@ struct Args {
     db: Option<PathBuf>,
     kind: Kind,
     case: CaseMode,
+    regex: bool,
+    word: bool,
+    match_path: bool,
+    wildcards_anywhere: bool,
     sort: Sort,
     reverse: bool,
     limit: usize,
@@ -77,6 +95,8 @@ struct Args {
     edit: bool,
     properties: bool,
     excludes: Vec<PathBuf>,
+    devices: Vec<PathBuf>,
+    no_hidden: bool,
     threads: usize,
 }
 
@@ -107,6 +127,10 @@ fn run() -> Result<ExitCode, String> {
             "-d" | "--dirs" => a.kind = Kind::Dir,
             "-c" | "--case" => a.case = CaseMode::Sensitive,
             "-i" | "--ignore-case" => a.case = CaseMode::Insensitive,
+            "-R" | "--regex" => a.regex = true,
+            "-w" | "--word" => a.word = true,
+            "--match-path" => a.match_path = true,
+            "--wildcards-anywhere" => a.wildcards_anywhere = true,
             "-r" | "--reverse" => a.reverse = true,
             "-l" | "--long" => a.long = true,
             "-0" | "--null" => a.null = true,
@@ -118,6 +142,8 @@ fn run() -> Result<ExitCode, String> {
             "-n" | "--limit" => a.limit = number(value(flag)?, flag)?,
             "-j" | "--threads" => a.threads = number(value(flag)?, flag)?,
             "-x" | "--exclude" => a.excludes.push(value(flag)?.into()),
+            "--device" => a.devices.push(value(flag)?.into()),
+            "--no-hidden" => a.no_hidden = true,
             "--db" => a.db = Some(value(flag)?.into()),
             "-s" | "--sort" => {
                 a.sort = match value(flag)?.to_str() {
@@ -177,9 +203,17 @@ fn cmd_index(a: &Args, db: &PathBuf) -> Result<ExitCode, String> {
         }
     }
     opts.threads = a.threads;
+    opts.skip_hidden |= a.no_hidden;
 
     let start = Instant::now();
-    let index = Index::build(&opts).map_err(|e| e.to_string())?;
+    // With only devices named, index just those; otherwise walk as usual.
+    let only_devices = !a.devices.is_empty() && a.free.len() == 1;
+    let mut index = if only_devices { Index::new() } else { Index::build(&opts).map_err(|e| e.to_string())? };
+    for device in &a.devices {
+        let name = std::os::unix::ffi::OsStrExt::as_bytes(device.as_os_str());
+        let read = ff_core::rawfs::scan(device, name).map_err(|e| format!("{}: {e}", device.display()))?;
+        index.append(&read);
+    }
     index.save(db).map_err(|e| format!("{}: {e}", db.display()))?;
     eprintln!(
         "indexed {} entries in {:.2}s -> {}",
@@ -203,12 +237,25 @@ fn cmd_stats(db: &PathBuf) -> Result<ExitCode, String> {
     for x in index.excludes() {
         println!("exclude:  {}", x.display());
     }
+    if index.skips_hidden() {
+        println!("exclude:  hidden files and folders (names starting with a dot)");
+    }
     Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_search(a: &Args, db: &PathBuf) -> Result<ExitCode, String> {
     let index = load(db)?;
-    let query = Query::from_terms(a.free.iter().map(|t| t.as_bytes()), a.case);
+    let options = ff_core::QueryOptions {
+        case: a.case,
+        regex: a.regex,
+        whole_word: a.word,
+        match_path: a.match_path,
+        wildcards_anywhere: a.wildcards_anywhere,
+    };
+    let query = Query::from_terms_opts(a.free.iter().map(|t| t.as_bytes()), &options);
+    if let Some(problem) = query.error() {
+        return Err(problem.to_string());
+    }
     let opts = SearchOptions {
         kind: a.kind,
         sort: a.sort,
@@ -253,7 +300,7 @@ fn print_hits(a: &Args, index: &Index, hits: &[u32]) -> io::Result<()> {
     let mut path = Vec::new();
     for &id in hits {
         if a.long {
-            let (y, mo, d, h, mi) = ff_core::utc_civil(index.mtime(id));
+            let (y, mo, d, h, mi) = ff_core::local_civil(index.mtime(id));
             let kind = if index.is_dir(id) { 'd' } else if index.is_symlink(id) { 'l' } else { '-' };
             write!(out, "{kind} {:>12} {y:04}-{mo:02}-{d:02} {h:02}:{mi:02}  ", index.size(id))?;
         }

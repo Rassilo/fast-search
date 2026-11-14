@@ -59,9 +59,13 @@ impl LiveIndex {
 
     /// True if `path` is an excluded directory or inside one.
     fn excluded(&self, path: &[u8]) -> bool {
-        self.index.excludes.iter().any(|x| {
-            path.strip_prefix(&x[..]).is_some_and(|rest| rest.is_empty() || rest[0] == b'/' || x.ends_with(b"/"))
-        })
+        // With hidden names left out, so is anything below a hidden folder.
+        let hidden = self.index.skips_hidden() && path.split(|&b| b == b'/').any(|part| part.starts_with(b"."));
+        hidden
+            || crate::walk::in_trash(path)
+            || self.index.excludes.iter().any(|x| {
+                path.strip_prefix(&x[..]).is_some_and(|rest| rest.is_empty() || rest[0] == b'/' || x.ends_with(b"/"))
+            })
     }
 
     /// Re-reads the given (directory path, entry name) pairs from disk and
@@ -69,7 +73,11 @@ impl LiveIndex {
     pub fn apply(&mut self, changes: &HashSet<(Vec<u8>, Vec<u8>)>) -> bool {
         // Which names to look for under which indexed directory.
         let mut wanted: HashMap<u32, HashSet<&[u8]>> = HashMap::new();
+        let skip_hidden = self.index.skips_hidden();
         for (dir, name) in changes {
+            if skip_hidden && name.starts_with(b".") {
+                continue;
+            }
             if let Some(&id) = self.dirs.get(dir).filter(|_| !self.excluded(dir)) {
                 wanted.entry(id).or_default().insert(name);
             }
@@ -151,6 +159,9 @@ impl LiveIndex {
             for entry in rd.flatten() {
                 let Ok(md) = entry.metadata() else { continue };
                 let name = entry.file_name();
+                if self.index.skips_hidden() && name.as_bytes().starts_with(b".") {
+                    continue;
+                }
                 let flags = type_flags(md.file_type());
                 let id = self.index.push(name.as_bytes(), dir_id, flags, md.size(), md.mtime());
                 if flags == FLAG_DIR {
