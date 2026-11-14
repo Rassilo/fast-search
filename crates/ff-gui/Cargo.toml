@@ -1,6 +1,6 @@
 [package]
 name = "ff-gui"
-description = "ff-gui: instant file search window (pure X11, no dependencies)"
+description = "ff-gui: instant file search window (native Wayland and X11, no toolkit)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,0 +1,8 @@
+# The project builds with a pinned nightly so that `cargo dist` can rebuild
+# the standard library for size. Ordinary builds and tests do not need
+# nightly features; they also work with a stable toolchain.
+[toolchain]
+channel = "nightly-2026-11-13"
+profile = "minimal"
+components = ["rust-src"]
+targets = ["x86_64-unknown-linux-musl"]

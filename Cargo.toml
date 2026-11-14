@@ -9,7 +9,7 @@ license = "MIT"
 
 # Size-first release build: one static binary, no unwinding tables, no symbols.
 [profile.release]
-opt-level = "s"
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
 panic = "abort"

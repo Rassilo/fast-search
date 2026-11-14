@@ -19,7 +19,25 @@ cd "$here/.."
 
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 rel=target/x86_64-unknown-linux-musl/release
-[ -n "${SKIP_BUILD:-}" ] || cargo build --release
+if [ -z "${SKIP_BUILD:-}" ]; then
+    # `cargo dist` also rebuilds the standard library for size; that needs
+    # a C linker for its build scripts. Without one, fall back to the
+    # ordinary release build (binaries are a little larger).
+    if command -v cc >/dev/null 2>&1; then
+        cargo dist
+    else
+        echo "build-packages: no C linker (cc): making an ordinary release build"
+        cargo build --release
+    fi
+fi
+# Guard the size: every binary must stay under 2 MB.
+for b in ff ff-gui ffd; do
+    size=$(wc -c < "target/x86_64-unknown-linux-musl/release/$b" 2>/dev/null || echo 0)
+    if [ "$size" -gt 2097152 ]; then
+        echo "build-packages: $b is $size bytes, over the 2 MB limit" >&2
+        exit 1
+    fi
+done
 for b in ff ff-gui ffd; do
     [ -x "$rel/$b" ] || { echo "build-packages: $rel/$b is missing" >&2; exit 1; }
 done

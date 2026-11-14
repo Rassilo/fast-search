@@ -21,9 +21,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y rpm squashfs-tools
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup target add x86_64-unknown-linux-musl
+          # Installs the nightly pinned in rust-toolchain.toml, with the
+          # standard library sources and the musl target.
+          rustup show active-toolchain || rustup toolchain install
 
       - name: Test
         run: cargo test

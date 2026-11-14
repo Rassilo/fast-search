@@ -21,7 +21,6 @@ optdepends=(
   'xdg-utils: open files with their default application'
   'glib2: move to trash, open in text editor, show in file manager'
   'polkit: install the live updates service from the window'
-  'xorg-xwayland: run the window on a Wayland desktop'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/$pkgver.tar.gz")
 sha256sums=('SKIP')

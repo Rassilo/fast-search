@@ -1,7 +1,8 @@
 # Fast search (`ff`)
 
-Instant file search for Linux, in the spirit of voidtools' *Everything*:
-type part of a name and get every matching file on the disk in milliseconds.
+**Everything on Linux.** Instant file search in the spirit of voidtools'
+*Everything*: type part of a name and get every matching file on the disk
+in milliseconds. (An independent project, not affiliated with voidtools.)
 
 ![Fast search window](docs/screenshot.png)
 
@@ -23,7 +24,7 @@ Website: <https://khunder.github.io/fast-search/>
 |---|---|---|
 | `crates/ff-core` | `libff_core.a`, Rust library | Index, parallel directory walker, query engine, live updates, C API |
 | `crates/ff-cli` | `ff` | Command-line search |
-| `crates/ff-gui` | `ff-gui` | "Fast search" window, drawn over the raw X11 protocol |
+| `crates/ff-gui` | `ff-gui` | "Fast search" window, drawn over the raw Wayland or X11 protocol |
 | `crates/ff-daemon` | `ffd` | Root daemon that keeps the index current with fanotify |
 
 Third-party code is limited to two small pure-Rust libraries:
@@ -52,13 +53,21 @@ not signed.
 
 ## Build
 
-You need Rust with the static musl target. No C compiler is required; the
-project links with the linker that ships with Rust.
+You need Rust, installed with rustup. No C compiler is required for an
+ordinary build; the project links with the linker that ships with Rust.
 
 ```sh
-rustup target add x86_64-unknown-linux-musl
-cargo build --release
+cargo build --release      # or: cargo dist   (smaller, see below)
 ```
+
+`rust-toolchain.toml` pins a nightly toolchain, which rustup installs by
+itself on the first build, together with the static musl target.
+
+`cargo dist` makes the smallest binaries: it also rebuilds Rust's standard
+library for size and turns panics into an immediate abort. It needs a C
+linker (`cc`, from gcc or clang) for the standard library's build scripts;
+the packages are built this way. A plain `cargo build --release` needs no
+C toolchain at all and also works with a stable Rust.
 
 The binaries land in `target/x86_64-unknown-linux-musl/release/`:
 `ff`, `ff-gui` and `ffd`. Copy or link them somewhere on your `PATH`, for
@@ -157,7 +166,9 @@ The window reloads the index by itself whenever the index file changes,
 so results follow `ff index` runs and the daemon.
 
 It has a light and a dark theme and follows the desktop's preference
-unless you choose one under **Options → Interface**. It follows the desktop scale (`Xft.dpi`). Override with `FF_GUI_SCALE=1.5`
+unless you choose one under **Options → Interface**. The window is
+available in English, French, Spanish and Italian (same page; it follows
+the system language by default). It follows the desktop scale (fractional scaling on Wayland, `Xft.dpi` on X11). Override with `FF_GUI_SCALE=1.5`
 and choose a font file with `FF_GUI_FONT=/path/to/font.ttf`.
 
 ## Live updates: the `ffd` daemon
@@ -313,13 +324,20 @@ under `/var/tmp` and leaves the system's `ffd` service alone. Name filesystems t
   directory is listed and added to the index in one short critical section.
 - **Search.** A parallel linear scan over the names. Name terms are checked
   first; the full path is only built for entries that pass them.
-- **Window.** `ff-gui` speaks the X11 wire protocol over the local socket,
-  draws every pixel itself (anti-aliased text, icons) and sends only the
-  rows that changed.
+- **Window.** `ff-gui` draws every pixel itself (anti-aliased text, icons)
+  and has two ways to show them, both spoken directly over the local
+  socket with no toolkit and no libwayland or Xlib: the **Wayland**
+  protocol (GNOME, KDE, Hyprland, Sway, ...) and the **X11** protocol. It
+  picks one at start-up: Wayland when `WAYLAND_DISPLAY` is set, X11
+  otherwise, and the other one if the first cannot be reached.
+  `FF_GUI_BACKEND=x11` or `FF_GUI_BACKEND=wayland` forces the choice.
 
 ## Limitations
 
-- Linux only; the window needs an X server (XWayland is fine).
+- Linux only. The window runs natively on Wayland and on X11.
+- On Wayland, typing accents with dead keys or Compose is not supported
+  yet, and a compositor without title bars of its own (GNOME) always gets
+  the built-in title bar.
 - No complex text shaping: Arabic and similar scripts are drawn as
   unconnected letters, left to right.
 - File icons are built in and chosen by extension, not taken from the

@@ -57,6 +57,7 @@ pub const MOD_ALT: u16 = 8;
 const MOD_NUM: u16 = 0x10;
 const MOD_LEVEL3: u16 = 0x80;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Key {
     Char(char),
     Sym(u32),
@@ -284,14 +285,6 @@ impl Conn {
     pub fn window_kind(&mut self, window: u32) -> io::Result<Option<(bool, bool, bool)>> {
         let seq = self.req(3, 0, &[W(window)]); // GetWindowAttributes
         Ok(self.reply(seq)?.filter(|r| r.len() >= 28).map(|r| (u16at(&r, 12) == 2, r[26] == 2, r[27] != 0)))
-    }
-
-    /// (x, y, width, height) of `window` relative to its parent.
-    pub fn geometry(&mut self, window: u32) -> io::Result<(i32, i32, i32, i32)> {
-        let seq = self.req(14, 0, &[W(window)]); // GetGeometry
-        let Some(r) = self.reply(seq)? else { return Ok((0, 0, 0, 0)) };
-        let at = |i| u16at(&r, i);
-        Ok((at(12) as i16 as i32, at(14) as i16 as i32, at(16) as i32, at(18) as i32))
     }
 
     /// The name of an atom (for diagnostics).

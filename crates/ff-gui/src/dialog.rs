@@ -56,8 +56,26 @@ enum Item {
 
 type Rect = (i32, i32, i32, i32);
 
+/// Puts the texts of dialog rows into the current language.
+fn localize(rows: Vec<Row>) -> Vec<Row> {
+    rows.into_iter()
+        .map(|row| match row {
+            Row::Text(t) => Row::Text(tr(&t).to_string()),
+            Row::Dim(t) => Row::Dim(tr(&t).to_string()),
+            Row::Pair(label, value) => Row::Pair(tr(label), tr(&value).to_string()),
+            Row::Check(label, action) => Row::Check(tr(label), action),
+            Row::Button(label, action) => Row::Button(tr(label), action),
+            Row::Input(hint, action) => Row::Input(tr(hint), action),
+            other => other,
+        })
+        .collect()
+}
+
+fn localize_nav(nav: Vec<NavItem>) -> Vec<NavItem> {
+    nav.into_iter().map(|item| NavItem { label: tr(item.label), ..item }).collect()
+}
+
 pub struct Dialog {
-    pub win: u32,
     pub cv: Canvas,
     rows: Vec<Row>,
     buttons: Vec<Button>,
@@ -73,6 +91,21 @@ pub struct Dialog {
     /// Index into the activatable items.
     focus: usize,
     hover: Option<usize>,
+    /// Height of the title bar we draw ourselves, on a desktop that gives
+    /// the window none (0 otherwise), and what the window then shows: the
+    /// bar above the content.
+    bar: i32,
+    title: String,
+    framed: Canvas,
+    close_hover: bool,
+}
+
+impl Dialog {
+    /// What the dialog window shows: its content, under our own title
+    /// bar if we draw one.
+    pub fn shown(&self) -> &Canvas {
+        if self.bar > 0 { &self.framed } else { &self.cv }
+    }
 }
 
 /// Where everything in a dialog goes.
@@ -111,6 +144,8 @@ impl App {
         heading: &str,
         rows: Vec<Row>,
     ) -> io::Result<()> {
+        let (rows, nav) = (localize(rows), localize_nav(nav));
+        let heading = tr(heading);
         if let Some(dialog) = self.dialog.as_mut().filter(|d| !d.nav.is_empty()) {
             // Same window, new page.
             // Redrawing the same page (a value changed) keeps the focus.
@@ -119,6 +154,7 @@ impl App {
                 dialog.hover = None;
             }
             dialog.rows = rows;
+            dialog.nav = nav; // its labels follow a language change
             dialog.nav_selected = nav_selected;
             dialog.heading = heading.to_string();
             return self.render_dialog();
@@ -142,56 +178,37 @@ impl App {
     ) -> io::Result<()> {
         self.close_dialog();
         self.menu = None;
+        let title = tr(title);
         let mut dialog = Dialog {
-            win: self.c.new_id(),
             cv: Canvas::new(),
-            rows,
-            buttons,
+            rows: localize(rows),
+            buttons: buttons.into_iter().map(|(label, action)| (tr(label), action)).collect(),
             danger,
             sheet: false,
-            nav,
+            nav: localize_nav(nav),
             nav_selected,
-            heading: heading.to_string(),
+            heading: tr(heading).to_string(),
             focus: 0,
             hover: None,
+            bar: if self.b.dialog_needs_title_bar() { self.row_h() + 10 * self.u } else { 0 },
+            title: title.to_string(),
+            framed: Canvas::new(),
+            close_hover: false,
         };
         let layout = self.dialog_layout(&dialog);
         let (w, h) = (layout.w, layout.h);
         dialog.focus = layout.items.iter().position(|i| i.4 == Item::Button(focus_button)).unwrap_or(0);
         dialog.cv.resize(w as usize, h as usize);
 
-        // Events: KeyPress | ButtonPress | PointerMotion | Exposure.
-        let (win, events) = (dialog.win, 0x1 | 0x4 | 0x40 | 0x8000);
-        let c = &mut self.c;
-        c.req(1, 0, &[W(win), W(c.root), H(0), H(0), H(w as u16), H(h as u16), H(0), H(1), W(0), W(0x800), W(events)]);
-        let atom = |c: &mut Conn, name: &str| c.intern_atom(name);
-        let words = |values: &[u32]| values.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
-        let net_wm_name = atom(c, "_NET_WM_NAME")?;
-        let wm_protocols = atom(c, "WM_PROTOCOLS")?;
-        let window_type = atom(c, "_NET_WM_WINDOW_TYPE")?;
-        let type_dialog = atom(c, "_NET_WM_WINDOW_TYPE_DIALOG")?;
-        let state_modal = atom(c, "_NET_WM_STATE_MODAL")?;
-        c.set_property(win, ATOM_WM_NAME, ATOM_STRING, 8, title.as_bytes());
-        c.set_property(win, net_wm_name, self.utf8_string, 8, title.as_bytes());
-        c.set_property(win, ATOM_WM_CLASS, ATOM_STRING, 8, b"ff-gui\0ff-gui\0");
-        c.set_property(win, wm_protocols, ATOM_ATOM, 32, &words(&[self.wm_delete]));
-        c.set_property(win, 68, 33, 32, &words(&[self.win])); // WM_TRANSIENT_FOR: belongs to the main window
-        c.set_property(win, window_type, ATOM_ATOM, 32, &words(&[type_dialog]));
-        c.set_property(win, self.net_wm_state, ATOM_ATOM, 32, &words(&[state_modal]));
-        // WM_NORMAL_HINTS: minimum size = maximum size, so it cannot be resized.
-        let mut hints = [0u32; 18];
-        hints[0] = 0x10 | 0x20;
-        (hints[5], hints[6], hints[7], hints[8]) = (w as u32, h as u32, w as u32, h as u32);
-        c.set_property(win, 40, 41, 32, &words(&hints));
-        c.req(8, 0, &[W(win)]); // MapWindow
-
+        self.b.open_dialog(w, h + dialog.bar, title)?;
         self.dialog = Some(dialog);
         self.render_dialog()
     }
 
     pub fn close_dialog(&mut self) {
         if let Some(dialog) = self.dialog.take() {
-            self.c.req(4, 0, &[W(dialog.win)]); // DestroyWindow
+            drop(dialog);
+            self.b.close_dialog();
             // The next time the Options window opens, its pages start fresh.
             self.options_page = None;
             self.index_settings_loaded = false;
@@ -435,8 +452,28 @@ impl App {
             self.text.draw(&mut d.cv, lx, by + (bh - self.text.height) / 2, label, bw, ink);
         }
 
-        self.c.put_image(d.win, self.gc, d.cv.w, 0, &d.cv.px)?;
-        self.c.flush()?;
+        if d.bar == 0 {
+            self.b.present(Win::Dialog, &d.cv)?;
+        } else {
+            // Our own title bar: the name, a close button, and a thin
+            // frame so the window stands out from what is behind it.
+            let (bar, bw) = (d.bar, 44 * u);
+            d.framed.resize(d.cv.w, d.cv.h + bar as usize);
+            d.framed.px[bar as usize * d.cv.w * 4..].copy_from_slice(&d.cv.px);
+            d.framed.fill(0, 0, w, bar, 0xe6e6e6);
+            d.framed.fill(0, bar - 1, w, 1, LINE);
+            self.text.draw(&mut d.framed, 14 * u, (bar - self.text.height) / 2, &d.title, w - bw - 20 * u, TEXT);
+            if d.close_hover {
+                d.framed.fill(w - bw, 0, bw, bar - 1, 0xd93025);
+            }
+            let (gx, gy, g, ink) = (w - bw + (bw - 10 * u) / 2, (bar - 10 * u) / 2, 10 * u, if d.close_hover { ON_ACCENT } else { 0x3a3a3a });
+            for i in 0..g {
+                d.framed.fill(gx + i, gy + i, line, line, ink);
+                d.framed.fill(gx + g - 1 - i, gy + i, line, line, ink);
+            }
+            d.framed.frame(0, 0, w, h + bar, line, 0x9a9a9a);
+            self.b.present(Win::Dialog, &d.framed)?;
+        }
         self.dialog = Some(d);
         Ok(())
     }
@@ -488,19 +525,47 @@ impl App {
     }
 
     /// Handles an event addressed to the dialog window.
-    pub fn dialog_event(&mut self, ev: &[u8]) -> io::Result<()> {
+    pub fn dialog_event(&mut self, event: &Event) -> io::Result<()> {
         let Some(d) = self.dialog.take() else { return Ok(()) };
         let items = self.dialog_layout(&d).items;
         let focus = d.focus;
+        let (bar, close_x, close_hover) = (d.bar, d.cv.w as i32 - 44 * self.u, d.close_hover);
         self.dialog = Some(d);
+        // The title bar we draw ourselves: drag to move, X to close.
+        let moved;
+        let event = match *event {
+            Event::Motion { win, x, y, mods } if bar > 0 => {
+                let on_close = y < bar && x >= close_x;
+                if on_close != close_hover {
+                    self.dialog.as_mut().unwrap().close_hover = on_close;
+                    self.render_dialog()?;
+                }
+                moved = Event::Motion { win, x, y: y - bar, mods };
+                &moved
+            }
+            Event::Press { win, button, x, y, time, mods } if bar > 0 => {
+                if y < bar {
+                    match (button, x >= close_x) {
+                        (1, true) => self.close_dialog(),
+                        (1, false) => self.b.start_move(),
+                        _ => {}
+                    }
+                    return Ok(());
+                }
+                moved = Event::Press { win, button, x, y: y - bar, time, mods };
+                &moved
+            }
+            _ => event,
+        };
         let count = items.len().max(1);
-        let at = |i| u16at(ev, i) as i16 as i32;
         let hit = |x: i32, y: i32| items.iter().position(|&(ix, iy, iw, ih, _)| x >= ix && x < ix + iw && y >= iy && y < iy + ih);
-        let time = u32at(ev, 4);
-        match ev[0] & 0x7f {
-            EV_CLIENT_MESSAGE if u32at(ev, 12) == self.wm_delete => self.close_dialog(),
-            EV_MOTION => {
-                let hover = hit(at(24), at(26));
+        match *event {
+            Event::Close(_) => {
+                self.close_dialog();
+                return Ok(());
+            }
+            Event::Motion { x, y, .. } => {
+                let hover = hit(x, y);
                 if let Some(d) = self.dialog.as_mut() {
                     if d.hover == hover {
                         return Ok(());
@@ -508,37 +573,37 @@ impl App {
                     d.hover = hover;
                 }
             }
-            EV_BUTTON_PRESS if ev[1] == 1 => {
-                if let Some(index) = hit(at(24), at(26)) {
+            Event::Press { button: 1, x, y, time, .. } => {
+                if let Some(index) = hit(x, y) {
                     self.dialog.as_mut().unwrap().focus = index;
                     self.dialog_activate(index, time);
                 }
             }
-            EV_KEY_PRESS => {
-                let state = u16at(ev, 28);
+            Event::Key { key, mods, .. } => {
                 let set_focus = |app: &mut App, f: usize| app.dialog.as_mut().unwrap().focus = f;
                 // With the text field focused, keys type into it.
                 let typing = matches!(items.get(focus), Some((.., Item::Input(_))));
-                match self.c.key(ev[1], state) {
-                    Key::Char(ch) if typing && state & MOD_CTRL != 0 => {
+                match key {
+                    Key::Char(ch) if typing && mods.ctrl => {
                         if ch.eq_ignore_ascii_case(&'v') {
-                            // Paste: the text arrives as a SelectionNotify.
-                            let body = [W(self.win), W(self.clipboard), W(self.utf8_string), W(self.paste_prop), W(0)];
-                            self.c.req(24, 0, &body);
+                            self.b.request_paste(); // the text arrives as an event
                         }
                         return Ok(());
                     }
                     Key::Char(ch) if typing && !ch.is_control() => self.dialog_input.push(ch),
                     Key::Sym(K_BACKSPACE) if typing => drop(self.dialog_input.pop()),
-                    Key::Sym(K_ESCAPE) => self.close_dialog(),
-                    Key::Sym(K_RETURN | K_KP_ENTER) | Key::Char(' ') => self.dialog_activate(focus, time),
-                    Key::Sym(K_TAB) if state & MOD_SHIFT != 0 => set_focus(self, (focus + count - 1) % count),
+                    Key::Sym(K_ESCAPE) => {
+                        self.close_dialog();
+                        return Ok(());
+                    }
+                    Key::Sym(K_RETURN | K_KP_ENTER) | Key::Char(' ') => self.dialog_activate(focus, 0),
+                    Key::Sym(K_TAB) if mods.shift => set_focus(self, (focus + count - 1) % count),
                     Key::Sym(K_BACK_TAB | K_LEFT | K_UP) => set_focus(self, (focus + count - 1) % count),
                     Key::Sym(K_TAB | K_RIGHT | K_DOWN) => set_focus(self, (focus + 1) % count),
                     _ => return Ok(()),
                 }
             }
-            _ => {} // Expose: just redraw
+            _ => {} // Redraw
         }
         self.render_dialog()
     }

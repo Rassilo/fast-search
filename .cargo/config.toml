@@ -5,3 +5,17 @@ target = "x86_64-unknown-linux-musl"
 
 [target.x86_64-unknown-linux-musl]
 linker = "rust-lld"
+
+# `cargo dist`: the release build with the standard library itself rebuilt
+# for size and with panics reduced to an immediate abort (no messages).
+# This is what the packages are made from. It compiles build scripts for
+# the host, so unlike a plain build it needs a C linker (`cc`) installed.
+[alias]
+dist = [
+    "build",
+    "--release",
+    "-Zbuild-std=std,panic_abort",
+    "-Zbuild-std-features=optimize_for_size",
+    "--config",
+    "build.rustflags=['-Zunstable-options', '-Cpanic=immediate-abort']",
+]

@@ -1,0 +1,323 @@
+//! Language packs for the window: English (built in), French, Spanish
+//! and Italian. Text is written in English in the code and looked up here
+//! when it is shown; anything without an entry stays in English.
+//!
+//! This file is generated; edit the table and keep the `{}` placeholders
+//! of each line in place.
+
+use std::collections::HashMap;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// 0 English, 1 French, 2 Spanish, 3 Italian.
+static LANGUAGE: AtomicUsize = AtomicUsize::new(0);
+
+pub fn set_language(language: usize) {
+    LANGUAGE.store(language.min(3), Ordering::Relaxed);
+}
+
+/// The language the system is set to (0 if it is not one we have).
+pub fn system_language() -> usize {
+    let locale = ["LC_ALL", "LC_MESSAGES", "LANG"].iter().find_map(|v| std::env::var(v).ok().filter(|l| !l.is_empty()));
+    match locale.as_deref().map(|l| l.get(..2).unwrap_or("")) {
+        Some("fr") => 1,
+        Some("es") => 2,
+        Some("it") => 3,
+        _ => 0,
+    }
+}
+
+fn table() -> &'static HashMap<&'static str, [&'static str; 3]> {
+    static TABLE: OnceLock<HashMap<&'static str, [&'static str; 3]>> = OnceLock::new();
+    TABLE.get_or_init(|| TEXTS.iter().copied().collect())
+}
+
+/// `text` in the current language.
+pub fn tr(text: &str) -> &str {
+    match LANGUAGE.load(Ordering::Relaxed) {
+        0 => text,
+        language => table().get(text).map_or(text, |t| t[language - 1]),
+    }
+}
+
+/// A sentence with `{}` placeholders, translated, with the values put in.
+pub fn trf(template: &str, values: &[&dyn std::fmt::Display]) -> String {
+    let mut out = String::new();
+    let mut values = values.iter();
+    let mut parts = tr(template).split("{}");
+    out.push_str(parts.next().unwrap_or(""));
+    for part in parts {
+        if let Some(value) = values.next() {
+            out.push_str(&value.to_string());
+        }
+        out.push_str(part);
+    }
+    out
+}
+
+/// English text and its [French, Spanish, Italian] translations.
+const TEXTS: [(&str, [&str; 3]); 240] = [
+    ("File", ["Fichier", "Archivo", "File"]),
+    ("Edit", ["Édition", "Editar", "Modifica"]),
+    ("View", ["Affichage", "Ver", "Visualizza"]),
+    ("Options", ["Options", "Opciones", "Opzioni"]),
+    ("Help", ["Aide", "Ayuda", "Aiuto"]),
+    ("Open", ["Ouvrir", "Abrir", "Apri"]),
+    ("Open folder", ["Ouvrir le dossier", "Abrir la carpeta", "Apri la cartella"]),
+    ("Open in text editor", ["Ouvrir dans l'éditeur de texte", "Abrir en el editor de texto", "Apri nell'editor di testo"]),
+    ("Copy", ["Copier", "Copiar", "Copia"]),
+    ("Copy full path", ["Copier le chemin complet", "Copiar la ruta completa", "Copia il percorso completo"]),
+    ("Copy name", ["Copier le nom", "Copiar el nombre", "Copia il nome"]),
+    ("Move to trash", ["Mettre à la corbeille", "Mover a la papelera", "Sposta nel cestino"]),
+    ("Delete permanently", ["Supprimer définitivement", "Eliminar definitivamente", "Elimina definitivamente"]),
+    ("Properties", ["Propriétés", "Propiedades", "Proprietà"]),
+    ("Rebuild index", ["Reconstruire l'index", "Reconstruir el índice", "Ricostruisci l'indice"]),
+    ("Quit", ["Quitter", "Salir", "Esci"]),
+    ("Cut", ["Couper", "Cortar", "Taglia"]),
+    ("Paste", ["Coller", "Pegar", "Incolla"]),
+    ("Select all text", ["Sélectionner tout le texte", "Seleccionar todo el texto", "Seleziona tutto il testo"]),
+    ("Select all results", ["Sélectionner tous les résultats", "Seleccionar todos los resultados", "Seleziona tutti i risultati"]),
+    ("All results", ["Tous les résultats", "Todos los resultados", "Tutti i risultati"]),
+    ("Files only", ["Fichiers uniquement", "Solo archivos", "Solo file"]),
+    ("Folders only", ["Dossiers uniquement", "Solo carpetas", "Solo cartelle"]),
+    ("Smart case", ["Casse intelligente", "Mayúsculas inteligentes", "Maiuscole intelligenti"]),
+    ("Case sensitive", ["Respecter la casse", "Distinguir mayúsculas", "Distingui maiuscole"]),
+    ("Case insensitive", ["Ignorer la casse", "Ignorar mayúsculas", "Ignora maiuscole"]),
+    ("Regular expressions", ["Expressions régulières", "Expresiones regulares", "Espressioni regolari"]),
+    ("Whole words only", ["Mots entiers uniquement", "Solo palabras completas", "Solo parole intere"]),
+    ("Options...", ["Options...", "Opciones...", "Opzioni..."]),
+    ("Drives...", ["Disques...", "Unidades...", "Unità..."]),
+    ("Zoom in", ["Zoom avant", "Acercar", "Ingrandisci"]),
+    ("Zoom out", ["Zoom arrière", "Alejar", "Riduci"]),
+    ("Reset zoom", ["Réinitialiser le zoom", "Restablecer el zoom", "Reimposta lo zoom"]),
+    ("Title bar with icon", ["Barre de titre avec icône", "Barra de título con icono", "Barra del titolo con icona"]),
+    ("Global shortcut Alt+E", ["Raccourci global Alt+E", "Atajo global Alt+E", "Scorciatoia globale Alt+E"]),
+    ("Show in applications menu", ["Afficher dans le menu des applications", "Mostrar en el menú de aplicaciones", "Mostra nel menu delle applicazioni"]),
+    ("Live updates service", ["Service de mise à jour en direct", "Servicio de actualización en vivo", "Servizio di aggiornamento in tempo reale"]),
+    ("asks for password", ["demande le mot de passe", "pide la contraseña", "chiede la password"]),
+    ("Search syntax", ["Syntaxe de recherche", "Sintaxis de búsqueda", "Sintassi di ricerca"]),
+    ("Filters", ["Filtres", "Filtros", "Filtri"]),
+    ("Keyboard shortcuts", ["Raccourcis clavier", "Atajos de teclado", "Scorciatoie da tastiera"]),
+    ("About Fast search", ["À propos de Fast search", "Acerca de Fast search", "Informazioni su Fast search"]),
+    ("Name", ["Nom", "Nombre", "Nome"]),
+    ("Path", ["Chemin", "Ruta", "Percorso"]),
+    ("Size", ["Taille", "Tamaño", "Dimensione"]),
+    ("Modified", ["Modifié", "Modificado", "Modificato"]),
+    ("objects", ["objets", "objetos", "oggetti"]),
+    ("{} of {}", ["{} sur {}", "{} de {}", "{} di {}"]),
+    ("F2 show", ["F2 afficher", "F2 mostrar", "F2 mostra"]),
+    ("F3 case", ["F3 casse", "F3 mayúsculas", "F3 maiuscole"]),
+    ("all", ["tout", "todo", "tutto"]),
+    ("files", ["fichiers", "archivos", "file"]),
+    ("folders", ["dossiers", "carpetas", "cartelle"]),
+    ("smart", ["intelligente", "inteligente", "intelligente"]),
+    ("sensitive", ["respectée", "distinguir", "distingui"]),
+    ("insensitive", ["ignorée", "ignorar", "ignora"]),
+    ("Ctrl+R regex: on", ["Ctrl+R regex : oui", "Ctrl+R regex: sí", "Ctrl+R regex: sì"]),
+    ("Ctrl+B whole words: on", ["Ctrl+B mots entiers : oui", "Ctrl+B palabras completas: sí", "Ctrl+B parole intere: sì"]),
+    ("F1 help", ["F1 aide", "F1 ayuda", "F1 aiuto"]),
+    ("Right-click for actions", ["Clic droit pour les actions", "Clic derecho para acciones", "Clic destro per le azioni"]),
+    ("folder", ["dossier", "carpeta", "cartella"]),
+    ("{} bytes", ["{} octets", "{} bytes", "{} byte"]),
+    ("Indexing...", ["Indexation...", "Indexando...", "Indicizzazione..."]),
+    ("Opening {}", ["Ouverture de {}", "Abriendo {}", "Apertura di {}"]),
+    ("Opening {} items", ["Ouverture de {} éléments", "Abriendo {} elementos", "Apertura di {} elementi"]),
+    ("Opening {} in the text editor", ["Ouverture de {} dans l'éditeur de texte", "Abriendo {} en el editor de texto", "Apertura di {} nell'editor di testo"]),
+    ("Showing {} in the file manager", ["Affichage de {} dans le gestionnaire de fichiers", "Mostrando {} en el gestor de archivos", "Visualizzazione di {} nel gestore file"]),
+    ("Copied {}", ["Copié : {}", "Copiado: {}", "Copiato: {}"]),
+    ("Copied {} lines", ["{} lignes copiées", "{} líneas copiadas", "{} righe copiate"]),
+    ("Copied {} files (paste them in a file manager)", ["{} fichiers copiés (collez-les dans un gestionnaire de fichiers)", "{} archivos copiados (péguelos en un gestor de archivos)", "{} file copiati (incollali in un gestore file)"]),
+    ("Copied the file {} (paste it in a file manager)", ["Fichier {} copié (collez-le dans un gestionnaire de fichiers)", "Archivo {} copiado (péguelo en un gestor de archivos)", "File {} copiato (incollalo in un gestore file)"]),
+    ("Could not copy: the clipboard is not available", ["Copie impossible : le presse-papiers n'est pas disponible", "No se pudo copiar: el portapapeles no está disponible", "Impossibile copiare: gli appunti non sono disponibili"]),
+    ("Moved {} to the trash", ["{} mis à la corbeille", "{} movido a la papelera", "{} spostato nel cestino"]),
+    ("Deleted {}", ["{} supprimé", "{} eliminado", "{} eliminato"]),
+    ("{} items", ["{} éléments", "{} elementos", "{} elementi"]),
+    ("Zoom {}%", ["Zoom {} %", "Zoom {}%", "Zoom {}%"]),
+    ("Dragging {} - drop it on another window to move it (hold Ctrl to copy)", ["Glissement de {} - déposez-le sur une autre fenêtre pour le déplacer (Ctrl pour copier)", "Arrastrando {} - suéltelo en otra ventana para moverlo (Ctrl para copiar)", "Trascinamento di {} - rilascialo su un'altra finestra per spostarlo (Ctrl per copiare)"]),
+    ("Dragging {} - cannot be dropped here", ["Glissement de {} - dépôt impossible ici", "Arrastrando {} - no se puede soltar aquí", "Trascinamento di {} - impossibile rilasciare qui"]),
+    ("Dragging {} - release to move it here (hold Ctrl to copy)", ["Glissement de {} - relâchez pour le déplacer ici (Ctrl pour copier)", "Arrastrando {} - suelte para moverlo aquí (Ctrl para copiar)", "Trascinamento di {} - rilascia per spostarlo qui (Ctrl per copiare)"]),
+    ("Dragging {} - release to copy it here", ["Glissement de {} - relâchez pour le copier ici", "Arrastrando {} - suelte para copiarlo aquí", "Trascinamento di {} - rilascia per copiarlo qui"]),
+    ("Moved {}", ["{} déplacé", "{} movido", "{} spostato"]),
+    ("Waiting for authorization...", ["En attente d'autorisation...", "Esperando autorización...", "In attesa di autorizzazione..."]),
+    ("The index is kept up to date by the ffd daemon", ["L'index est tenu à jour par le service ffd", "El servicio ffd mantiene el índice actualizado", "L'indice è mantenuto aggiornato dal servizio ffd"]),
+    ("Select a folder in the results first", ["Sélectionnez d'abord un dossier dans les résultats", "Seleccione primero una carpeta en los resultados", "Seleziona prima una cartella nei risultati"]),
+    ("A folder to exclude must be a full path, like /home/me/Videos", ["Un dossier à exclure doit être un chemin complet, comme /home/moi/Vidéos", "Una carpeta a excluir debe ser una ruta completa, como /home/yo/Vídeos", "Una cartella da escludere deve essere un percorso completo, come /home/io/Video"]),
+    ("Move to trash?", ["Mettre à la corbeille ?", "¿Mover a la papelera?", "Spostare nel cestino?"]),
+    ("Move this file to the trash?", ["Mettre ce fichier à la corbeille ?", "¿Mover este archivo a la papelera?", "Spostare questo file nel cestino?"]),
+    ("Move this folder and everything in it to the trash?", ["Mettre ce dossier et tout son contenu à la corbeille ?", "¿Mover esta carpeta y todo su contenido a la papelera?", "Spostare questa cartella e tutto il suo contenuto nel cestino?"]),
+    ("Move these {} items to the trash?", ["Mettre ces {} éléments à la corbeille ?", "¿Mover estos {} elementos a la papelera?", "Spostare questi {} elementi nel cestino?"]),
+    ("Permanently delete this file? This cannot be undone.", ["Supprimer définitivement ce fichier ? Cette action est irréversible.", "¿Eliminar definitivamente este archivo? Esta acción no se puede deshacer.", "Eliminare definitivamente questo file? L'operazione non può essere annullata."]),
+    ("Permanently delete this folder and everything in it? This cannot be undone.", ["Supprimer définitivement ce dossier et tout son contenu ? Cette action est irréversible.", "¿Eliminar definitivamente esta carpeta y todo su contenido? Esta acción no se puede deshacer.", "Eliminare definitivamente questa cartella e tutto il suo contenuto? L'operazione non può essere annullata."]),
+    ("Permanently delete these {} items? This cannot be undone.", ["Supprimer définitivement ces {} éléments ? Cette action est irréversible.", "¿Eliminar definitivamente estos {} elementos? Esta acción no se puede deshacer.", "Eliminare definitivamente questi {} elementi? L'operazione non può essere annullata."]),
+    ("... and {} more", ["... et {} de plus", "... y {} más", "... e altri {}"]),
+    ("Location", ["Emplacement", "Ubicación", "Posizione"]),
+    ("Cancel", ["Annuler", "Cancelar", "Annulla"]),
+    ("OK", ["OK", "Aceptar", "OK"]),
+    ("Apply", ["Appliquer", "Aplicar", "Applica"]),
+    ("Close", ["Fermer", "Cerrar", "Chiudi"]),
+    ("Shortcuts", ["Raccourcis", "Atajos", "Scorciatoie"]),
+    ("Type", ["Type", "Tipo", "Tipo"]),
+    ("Target", ["Cible", "Destino", "Destinazione"]),
+    ("Contains", ["Contient", "Contiene", "Contiene"]),
+    ("Accessed", ["Consulté", "Accedido", "Ultimo accesso"]),
+    ("Created", ["Créé", "Creado", "Creato"]),
+    ("Permissions", ["Permissions", "Permisos", "Permessi"]),
+    ("Owner", ["Propriétaire", "Propietario", "Proprietario"]),
+    ("Folder", ["Dossier", "Carpeta", "Cartella"]),
+    ("Symbolic link", ["Lien symbolique", "Enlace simbólico", "Collegamento simbolico"]),
+    ("Press any key or click to close", ["Appuyez sur une touche ou cliquez pour fermer", "Pulse una tecla o haga clic para cerrar", "Premi un tasto o fai clic per chiudere"]),
+    ("Version {}", ["Version {}", "Versión {}", "Versione {}"]),
+    ("Instant file search for Linux", ["Recherche instantanée de fichiers pour Linux", "Búsqueda instantánea de archivos para Linux", "Ricerca istantanea di file per Linux"]),
+    ("{} files and folders indexed", ["{} fichiers et dossiers indexés", "{} archivos y carpetas indexados", "{} file e cartelle indicizzati"]),
+    ("MIT License", ["Licence MIT", "Licencia MIT", "Licenza MIT"]),
+    ("General", ["Général", "General", "Generale"]),
+    ("Interface", ["Interface", "Interfaz", "Interfaccia"]),
+    ("Search", ["Recherche", "Búsqueda", "Ricerca"]),
+    ("Results", ["Résultats", "Resultados", "Risultati"]),
+    ("Desktop", ["Bureau", "Escritorio", "Desktop"]),
+    ("Indexes", ["Index", "Índices", "Indici"]),
+    ("Live updates", ["Mises à jour en direct", "Actualización en vivo", "Aggiornamenti in tempo reale"]),
+    ("Drives", ["Disques", "Unidades", "Unità"]),
+    ("Exclude", ["Exclusions", "Excluir", "Esclusioni"]),
+    ("Title bar with the application icon", ["Barre de titre avec l'icône de l'application", "Barra de título con el icono de la aplicación", "Barra del titolo con l'icona dell'applicazione"]),
+    ("Zoom", ["Zoom", "Zoom", "Zoom"]),
+    ("Reset to the desktop scale", ["Revenir à l'échelle du bureau", "Volver a la escala del escritorio", "Torna alla scala del desktop"]),
+    ("Theme", ["Thème", "Tema", "Tema"]),
+    ("Follow the desktop", ["Suivre le bureau", "Seguir el escritorio", "Segui il desktop"]),
+    ("Light", ["Clair", "Claro", "Chiaro"]),
+    ("Dark", ["Sombre", "Oscuro", "Scuro"]),
+    ("Language", ["Langue", "Idioma", "Lingua"]),
+    ("Follow the system", ["Suivre le système", "Seguir el sistema", "Segui il sistema"]),
+    ("How the search text is read", ["Interprétation du texte recherché", "Cómo se interpreta el texto de búsqueda", "Come viene interpretato il testo di ricerca"]),
+    ("Match whole words only", ["Mots entiers uniquement", "Solo palabras completas", "Solo parole intere"]),
+    ("Match the full path, not just the name", ["Rechercher dans le chemin complet, pas seulement le nom", "Buscar en la ruta completa, no solo en el nombre", "Cerca nel percorso completo, non solo nel nome"]),
+    ("Match whole filename when using wildcards", ["Les jokers doivent couvrir tout le nom du fichier", "Los comodines deben abarcar todo el nombre", "I caratteri jolly devono coprire tutto il nome"]),
+    ("Letter case", ["Casse des lettres", "Mayúsculas y minúsculas", "Maiuscole e minuscole"]),
+    ("Smart: exact only when you type an uppercase letter", ["Intelligente : exacte seulement si vous tapez une majuscule", "Inteligente: exacta solo si escribe una mayúscula", "Intelligente: esatta solo se digiti una maiuscola"]),
+    ("Always case-sensitive", ["Toujours respecter la casse", "Distinguir siempre mayúsculas", "Distingui sempre le maiuscole"]),
+    ("Never case-sensitive", ["Ne jamais respecter la casse", "No distinguir nunca mayúsculas", "Non distinguere mai le maiuscole"]),
+    ("Show", ["Afficher", "Mostrar", "Mostra"]),
+    ("Files and folders", ["Fichiers et dossiers", "Archivos y carpetas", "File e cartelle"]),
+    ("Hide results when the search is empty", ["Masquer les résultats quand la recherche est vide", "Ocultar los resultados cuando la búsqueda está vacía", "Nascondi i risultati quando la ricerca è vuota"]),
+    ("Close window on execute", ["Fermer la fenêtre après l'ouverture", "Cerrar la ventana al abrir", "Chiudi la finestra all'apertura"]),
+    ("Open path with double click in path column", ["Ouvrir le chemin par double-clic dans la colonne Chemin", "Abrir la ruta con doble clic en la columna Ruta", "Apri il percorso con doppio clic nella colonna Percorso"]),
+    ("Double quote copy as path", ["Copier les chemins entre guillemets", "Copiar las rutas entre comillas", "Copia i percorsi tra virgolette"]),
+    ("First click on a column header", ["Premier clic sur un en-tête de colonne", "Primer clic en un encabezado de columna", "Primo clic su un'intestazione di colonna"]),
+    ("Sort date descending first (newest on top)", ["Trier les dates par ordre décroissant (plus récents en haut)", "Ordenar fechas de forma descendente (más recientes arriba)", "Ordina le date in modo decrescente (più recenti in alto)"]),
+    ("Sort size descending first (largest on top)", ["Trier les tailles par ordre décroissant (plus gros en haut)", "Ordenar tamaños de forma descendente (más grandes arriba)", "Ordina le dimensioni in modo decrescente (più grandi in alto)"]),
+    ("Alternate row color", ["Alterner la couleur des lignes", "Alternar el color de las filas", "Alterna il colore delle righe"]),
+    ("Show row mouseover", ["Surligner la ligne sous le pointeur", "Resaltar la fila bajo el puntero", "Evidenzia la riga sotto il puntatore"]),
+    ("Show selected item in status bar", ["Afficher l'élément sélectionné dans la barre d'état", "Mostrar el elemento seleccionado en la barra de estado", "Mostra l'elemento selezionato nella barra di stato"]),
+    ("Size format", ["Format des tailles", "Formato de tamaño", "Formato delle dimensioni"]),
+    ("Auto (B, KB, MB, GB)", ["Auto (o, Ko, Mo, Go)", "Auto (B, KB, MB, GB)", "Auto (B, KB, MB, GB)"]),
+    ("Bytes", ["Octets", "Bytes", "Byte"]),
+    ("Global shortcut Alt+E opens Fast search", ["Le raccourci global Alt+E ouvre Fast search", "El atajo global Alt+E abre Fast search", "La scorciatoia globale Alt+E apre Fast search"]),
+    ("Show in the applications menu", ["Afficher dans le menu des applications", "Mostrar en el menú de aplicaciones", "Mostra nel menu delle applicazioni"]),
+    ("Keep the index current with the live updates service", ["Tenir l'index à jour avec le service de mise à jour en direct", "Mantener el índice actualizado con el servicio en vivo", "Mantieni l'indice aggiornato con il servizio in tempo reale"]),
+    ("Switching it asks for your password. Everyone in your group can then", ["Le changer demande votre mot de passe. Tous les membres de votre groupe pourront", "Cambiarlo pide su contraseña. Todos los miembros de su grupo podrán", "Cambiarlo richiede la password. Tutti i membri del tuo gruppo potranno"]),
+    ("search the names of all files on this computer.", ["rechercher les noms de tous les fichiers de cet ordinateur.", "buscar los nombres de todos los archivos de este equipo.", "cercare i nomi di tutti i file di questo computer."]),
+    ("Index file", ["Fichier d'index", "Archivo de índice", "File dell'indice"]),
+    ("Indexed", ["Indexé", "Indexado", "Indicizzato"]),
+    ("{} files and folders", ["{} fichiers et dossiers", "{} archivos y carpetas", "{} file e cartelle"]),
+    ("Rebuild the index now", ["Reconstruire l'index maintenant", "Reconstruir el índice ahora", "Ricostruisci l'indice ora"]),
+    ("Automatically include drives when they are mounted", ["Inclure automatiquement les disques lorsqu'ils sont montés", "Incluir automáticamente las unidades al montarlas", "Includi automaticamente le unità quando vengono montate"]),
+    ("Drives that go away are always removed from the index.", ["Les disques retirés sont toujours supprimés de l'index.", "Las unidades retiradas siempre se quitan del índice.", "Le unità rimosse vengono sempre tolte dall'indice."]),
+    ("Drives:", ["Disques :", "Unidades:", "Unità:"]),
+    ("No drives found (this needs the lsblk command).", ["Aucun disque trouvé (la commande lsblk est nécessaire).", "No se encontraron unidades (se necesita el comando lsblk).", "Nessuna unità trovata (serve il comando lsblk)."]),
+    ("not mounted", ["non monté", "no montada", "non montata"]),
+    ("included", ["inclus", "incluida", "inclusa"]),
+    ("not included", ["non inclus", "no incluida", "non inclusa"]),
+    ("Settings for {}", ["Paramètres de {}", "Ajustes de {}", "Impostazioni di {}"]),
+    ("This kind of drive can only be indexed while it is mounted.", ["Ce type de disque ne peut être indexé que lorsqu'il est monté.", "Este tipo de unidad solo se puede indexar mientras está montada.", "Questo tipo di unità può essere indicizzato solo quando è montato."]),
+    ("Include in the index (read directly, without mounting it)", ["Inclure dans l'index (lecture directe, sans le monter)", "Incluir en el índice (lectura directa, sin montarla)", "Includi nell'indice (lettura diretta, senza montarla)"]),
+    ("Its files can be found, but not opened until it is mounted.", ["Ses fichiers peuvent être trouvés, mais pas ouverts tant qu'il n'est pas monté.", "Sus archivos se pueden encontrar, pero no abrir hasta que se monte.", "I suoi file possono essere trovati, ma non aperti finché non viene montata."]),
+    ("Include in the index", ["Inclure dans l'index", "Incluir en el índice", "Includi nell'indice"]),
+    ("Monitor changes", ["Surveiller les modifications", "Supervisar los cambios", "Monitora le modifiche"]),
+    ("Exclude hidden files and folders (names starting with a dot)", ["Exclure les fichiers et dossiers cachés (noms commençant par un point)", "Excluir archivos y carpetas ocultos (nombres que empiezan por punto)", "Escludi file e cartelle nascosti (nomi che iniziano con un punto)"]),
+    ("Excluded folders:", ["Dossiers exclus :", "Carpetas excluidas:", "Cartelle escluse:"]),
+    ("      (none)", ["      (aucun)", "      (ninguna)", "      (nessuna)"]),
+    ("Remove the selected folder", ["Retirer le dossier sélectionné", "Quitar la carpeta seleccionada", "Rimuovi la cartella selezionata"]),
+    ("Add a folder: type or paste its full path, then press Enter", ["Ajouter un dossier : tapez ou collez son chemin complet, puis appuyez sur Entrée", "Añadir una carpeta: escriba o pegue su ruta completa y pulse Intro", "Aggiungi una cartella: digita o incolla il percorso completo, poi premi Invio"]),
+    ("/path/to/folder", ["/chemin/du/dossier", "/ruta/de/la/carpeta", "/percorso/della/cartella"]),
+    ("Add the folder selected in the results", ["Ajouter le dossier sélectionné dans les résultats", "Añadir la carpeta seleccionada en los resultados", "Aggiungi la cartella selezionata nei risultati"]),
+    ("Always excluded: /proc, /sys, /dev, /run, /.snapshots and trash folders.", ["Toujours exclus : /proc, /sys, /dev, /run, /.snapshots et les corbeilles.", "Siempre excluidos: /proc, /sys, /dev, /run, /.snapshots y las papeleras.", "Sempre esclusi: /proc, /sys, /dev, /run, /.snapshots e i cestini."]),
+    ("Not saved yet: press Apply or OK (asks for your password, rebuilds the index).", ["Pas encore enregistré : appuyez sur Appliquer ou OK (demande votre mot de passe, reconstruit l'index).", "Aún sin guardar: pulse Aplicar o Aceptar (pide su contraseña, reconstruye el índice).", "Non ancora salvato: premi Applica o OK (chiede la password, ricostruisce l'indice)."]),
+    ("Not saved yet: press Apply or OK (rebuilds the index).", ["Pas encore enregistré : appuyez sur Appliquer ou OK (reconstruit l'index).", "Aún sin guardar: pulse Aplicar o Aceptar (reconstruye el índice).", "Non ancora salvato: premi Applica o OK (ricostruisce l'indice)."]),
+    ("Changes here are saved with Apply or OK, which asks for your password.", ["Les modifications ici sont enregistrées avec Appliquer ou OK, qui demande votre mot de passe.", "Los cambios aquí se guardan con Aplicar o Aceptar, que pide su contraseña.", "Le modifiche qui vengono salvate con Applica o OK, che chiede la password."]),
+    ("Changes here are saved with Apply or OK, which rebuilds the index.", ["Les modifications ici sont enregistrées avec Appliquer ou OK, qui reconstruit l'index.", "Los cambios aquí se guardan con Aplicar o Aceptar, que reconstruye el índice.", "Le modifiche qui vengono salvate con Applica o OK, che ricostruisce l'indice."]),
+    ("Type words: results contain all of them, in any order.", ["Tapez des mots : les résultats les contiennent tous, dans n'importe quel ordre.", "Escriba palabras: los resultados las contienen todas, en cualquier orden.", "Digita parole: i risultati le contengono tutte, in qualsiasi ordine."]),
+    ("names containing \"report\"", ["noms contenant « report »", "nombres que contienen «report»", "nomi che contengono «report»"]),
+    ("names containing both words", ["noms contenant les deux mots", "nombres que contienen ambas palabras", "nomi che contengono entrambe le parole"]),
+    ("quotes keep a space inside a word", ["les guillemets gardent une espace dans un mot", "las comillas conservan un espacio dentro de una palabra", "le virgolette mantengono uno spazio dentro una parola"]),
+    ("wildcard on the whole name: * any text, ? one character", ["joker sur le nom entier : * tout texte, ? un caractère", "comodín sobre todo el nombre: * cualquier texto, ? un carácter", "carattere jolly sull'intero nome: * qualsiasi testo, ? un carattere"]),
+    ("a slash searches the full path, not just the name", ["une barre oblique cherche dans le chemin complet, pas seulement le nom", "una barra busca en la ruta completa, no solo en el nombre", "una barra cerca nel percorso completo, non solo nel nome"]),
+    ("names that do not contain \"draft\"", ["noms ne contenant pas « draft »", "nombres que no contienen «draft»", "nomi che non contengono «draft»"]),
+    ("an uppercase letter makes that word case-sensitive", ["une majuscule rend ce mot sensible à la casse", "una mayúscula hace que esa palabra distinga mayúsculas", "una maiuscola rende quella parola sensibile alle maiuscole"]),
+    ("Options (also in the View menu)", ["Options (aussi dans le menu Affichage)", "Opciones (también en el menú Ver)", "Opzioni (anche nel menu Visualizza)"]),
+    ("regular expressions, such as  ^IMG_\\d+\\.jpe?g$", ["expressions régulières, par exemple  ^IMG_\\d+\\.jpe?g$", "expresiones regulares, como  ^IMG_\\d+\\.jpe?g$", "espressioni regolari, come  ^IMG_\\d+\\.jpe?g$"]),
+    ("whole words only: \"port\" finds \"port 80\", not \"report\"", ["mots entiers uniquement : « port » trouve « port 80 », pas « report »", "solo palabras completas: «port» encuentra «port 80», no «report»", "solo parole intere: «port» trova «port 80», non «report»"]),
+    ("letter case: smart, sensitive, insensitive", ["casse : intelligente, respectée, ignorée", "mayúsculas: inteligente, distinguir, ignorar", "maiuscole: intelligente, distingui, ignora"]),
+    ("show everything, files only, or folders only", ["tout afficher, fichiers uniquement ou dossiers uniquement", "mostrar todo, solo archivos o solo carpetas", "mostra tutto, solo file o solo cartelle"]),
+    ("Filters narrow the results; mix them with words.", ["Les filtres restreignent les résultats ; combinez-les avec des mots.", "Los filtros acotan los resultados; combínelos con palabras.", "I filtri restringono i risultati; combinali con le parole."]),
+    ("By extension", ["Par extension", "Por extensión", "Per estensione"]),
+    ("PDF files", ["fichiers PDF", "archivos PDF", "file PDF"]),
+    ("any of several extensions", ["une extension parmi plusieurs", "cualquiera de varias extensiones", "una tra più estensioni"]),
+    ("compound extensions", ["extensions composées", "extensiones compuestas", "estensioni composte"]),
+    ("By size  (K, M, G, T;  1K = 1024 bytes)", ["Par taille  (K, M, G, T ;  1K = 1024 octets)", "Por tamaño  (K, M, G, T;  1K = 1024 bytes)", "Per dimensione  (K, M, G, T;  1K = 1024 byte)"]),
+    ("larger than 100 MB  (also  >=  <  <=)", ["plus de 100 Mo  (aussi  >=  <  <=)", "mayores de 100 MB  (también  >=  <  <=)", "più grandi di 100 MB  (anche  >=  <  <=)"]),
+    ("between 10 MB and 1 GB", ["entre 10 Mo et 1 Go", "entre 10 MB y 1 GB", "tra 10 MB e 1 GB"]),
+    ("empty files", ["fichiers vides", "archivos vacíos", "file vuoti"]),
+    ("By date modified  (dm: for short)", ["Par date de modification  (dm: en abrégé)", "Por fecha de modificación  (dm: abreviado)", "Per data di modifica  (dm: in breve)"]),
+    ("since midnight  (also  yesterday)", ["depuis minuit  (aussi  yesterday)", "desde medianoche  (también  yesterday)", "da mezzanotte  (anche  yesterday)"]),
+    ("in the last 3 hours", ["au cours des 3 dernières heures", "en las últimas 3 horas", "nelle ultime 3 ore"]),
+    ("in the last 7 days", ["au cours des 7 derniers jours", "en los últimos 7 días", "negli ultimi 7 giorni"]),
+    ("on that day", ["ce jour-là", "ese día", "quel giorno"]),
+    ("between two dates", ["entre deux dates", "entre dos fechas", "tra due date"]),
+    ("since a date   ( ..date  means before )", ["depuis une date   ( ..date  signifie avant )", "desde una fecha   ( ..fecha  significa antes )", "da una data   ( ..data  significa prima )"]),
+    ("Together", ["Ensemble", "Combinados", "Insieme"]),
+    ("big PDF invoices from the last month", ["grosses factures PDF du dernier mois", "facturas PDF grandes del último mes", "grandi fatture PDF dell'ultimo mese"]),
+    ("move through the results", ["parcourir les résultats", "moverse por los resultados", "scorri i risultati"]),
+    ("first and last result", ["premier et dernier résultat", "primer y último resultado", "primo e ultimo risultato"]),
+    ("Shift + those keys", ["Maj + ces touches", "Mayús + esas teclas", "Maiusc + quei tasti"]),
+    ("select several results  (also Shift+click, Ctrl+click)", ["sélectionner plusieurs résultats  (aussi Maj+clic, Ctrl+clic)", "seleccionar varios resultados  (también Mayús+clic, Ctrl+clic)", "seleziona più risultati  (anche Maiusc+clic, Ctrl+clic)"]),
+    ("select all results", ["sélectionner tous les résultats", "seleccionar todos los resultados", "seleziona tutti i risultati"]),
+    ("open                        (double-click)", ["ouvrir                      (double-clic)", "abrir                       (doble clic)", "apri                        (doppio clic)"]),
+    ("open in the text editor", ["ouvrir dans l'éditeur de texte", "abrir en el editor de texto", "apri nell'editor di testo"]),
+    ("show in the file manager    (double-click the path)", ["afficher dans le gestionnaire de fichiers    (double-clic sur le chemin)", "mostrar en el gestor de archivos    (doble clic en la ruta)", "mostra nel gestore file    (doppio clic sul percorso)"]),
+    ("properties", ["propriétés", "propiedades", "proprietà"]),
+    ("copy the files, to paste in a file manager", ["copier les fichiers, à coller dans un gestionnaire de fichiers", "copiar los archivos, para pegar en un gestor de archivos", "copia i file, da incollare in un gestore file"]),
+    ("copy the full paths", ["copier les chemins complets", "copiar las rutas completas", "copia i percorsi completi"]),
+    ("move to the trash  (asks first)", ["mettre à la corbeille  (demande confirmation)", "mover a la papelera  (pregunta antes)", "sposta nel cestino  (chiede conferma)"]),
+    ("delete permanently  (asks first)", ["supprimer définitivement  (demande confirmation)", "eliminar definitivamente  (pregunta antes)", "elimina definitivamente  (chiede conferma)"]),
+    ("Drag", ["Glisser", "Arrastrar", "Trascina"]),
+    ("move to another window; hold Ctrl to copy", ["déplacer vers une autre fenêtre ; Ctrl pour copier", "mover a otra ventana; Ctrl para copiar", "sposta in un'altra finestra; Ctrl per copiare"]),
+    ("paste, cut, select all in the search box", ["coller, couper, tout sélectionner dans la zone de recherche", "pegar, cortar, seleccionar todo en el cuadro de búsqueda", "incolla, taglia, seleziona tutto nella casella di ricerca"]),
+    ("regular expressions, whole words", ["expressions régulières, mots entiers", "expresiones regulares, palabras completas", "espressioni regolari, parole intere"]),
+    ("files or folders, letter case", ["fichiers ou dossiers, casse", "archivos o carpetas, mayúsculas", "file o cartelle, maiuscole"]),
+    ("rebuild the index", ["reconstruire l'index", "reconstruir el índice", "ricostruisci l'indice"]),
+    ("zoom in, out, reset", ["zoom avant, arrière, réinitialiser", "acercar, alejar, restablecer", "ingrandisci, riduci, reimposta"]),
+    ("clear the search box; quit when it is empty", ["vider la zone de recherche ; quitter si elle est vide", "vaciar el cuadro de búsqueda; salir si está vacío", "svuota la casella di ricerca; esci se è vuota"]),
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placeholders_survive_translation() {
+        for (english, translations) in TEXTS {
+            for translated in translations {
+                assert_eq!(english.matches("{}").count(), translated.matches("{}").count(), "{english}");
+                assert!(!translated.is_empty(), "{english}");
+            }
+        }
+    }
+
+    #[test]
+    fn fills_in_values() {
+        // (Tests share the language setting, so only English is checked here.)
+        assert_eq!(trf("Moved {} to the trash", &[&"a.txt"]), "Moved a.txt to the trash");
+        assert_eq!(trf("{} of {}", &[&3, &"657"]), "3 of 657");
+        assert_eq!(tr("no such entry"), "no such entry");
+    }
+}
