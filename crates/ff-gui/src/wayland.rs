@@ -1159,6 +1159,14 @@ impl Backend for Wayland {
             // A held key types again when its time comes.
             if let Some((code, win, at)) = self.repeating {
                 if now >= at {
+                    // Read what the compositor sent first: when handling a key
+                    // takes longer than the repeat interval, the release would
+                    // otherwise never be seen and the key would repeat forever.
+                    while self.step(Some(Duration::ZERO))? {}
+                    if !self.pending.is_empty() || self.repeating.is_none_or(|(held, ..)| held != code) {
+                        continue;
+                    }
+                    let now = Instant::now();
                     let key = self.keymap.key(code, self.mods, self.group);
                     let interval = Duration::from_millis((1000 / self.repeat_rate.max(1)).max(1) as u64);
                     self.repeating = Some((code, win, now + interval));

@@ -48,6 +48,7 @@ pub const K_F2: u32 = 0xffbf;
 pub const K_F3: u32 = 0xffc0;
 pub const K_F4: u32 = 0xffc1;
 pub const K_F5: u32 = 0xffc2;
+pub const K_F6: u32 = 0xffc3;
 
 // Modifier bits in an event's state field.
 pub const MOD_SHIFT: u16 = 1;

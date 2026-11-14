@@ -3,6 +3,98 @@ use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+unsafe extern "C" {
+    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
+    fn munmap(addr: *mut u8, len: usize) -> i32;
+}
+
+/// An index file mapped into memory, read-only. Its pages are the
+/// system's own copy of the file, shared by every program that maps it.
+struct Map {
+    at: *mut u8,
+    len: usize,
+}
+
+// SAFETY: the mapping is never written through and lives until dropped.
+unsafe impl Send for Map {}
+unsafe impl Sync for Map {}
+
+impl Map {
+    fn open(path: &Path) -> io::Result<Map> {
+        use std::os::fd::AsRawFd;
+        let file = fs::File::open(path)?;
+        let len = file.metadata()?.len() as usize;
+        if len == 0 {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        // SAFETY: a new read-only (1), private (2) mapping of a file we
+        // hold open; the kernel picks the address.
+        let at = unsafe { mmap(std::ptr::null_mut(), len, 1, 2, file.as_raw_fd(), 0) };
+        if at as isize == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Map { at, len })
+    }
+
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: `at..at + len` is our mapping, valid until drop.
+        unsafe { std::slice::from_raw_parts(self.at, self.len) }
+    }
+}
+
+impl Drop for Map {
+    fn drop(&mut self) {
+        // SAFETY: exactly the range `open` mapped.
+        unsafe { munmap(self.at, self.len) };
+    }
+}
+
+/// One column of the index: values of our own, or values read straight
+/// from the mapped file (which become our own the first time they are
+/// changed).
+pub(crate) enum Col<T> {
+    Owned(Vec<T>),
+    /// Pointer and count inside the index's `Map`, which outlives it.
+    Mapped(*const T, usize),
+}
+
+// SAFETY: a mapped column is read-only memory kept alive by the index.
+unsafe impl<T: Send> Send for Col<T> {}
+unsafe impl<T: Sync> Sync for Col<T> {}
+
+impl<T> std::ops::Deref for Col<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        match self {
+            Col::Owned(values) => values,
+            // SAFETY: checked when the column was made: in bounds of the
+            // map, aligned, and the map lives as long as the index.
+            Col::Mapped(at, len) => unsafe { std::slice::from_raw_parts(*at, *len) },
+        }
+    }
+}
+
+impl<T: Copy> Col<T> {
+    /// The values for changing; a mapped column is copied first.
+    pub(crate) fn to_mut(&mut self) -> &mut Vec<T> {
+        if let Col::Mapped(..) = self {
+            *self = Col::Owned(self.to_vec());
+        }
+        match self {
+            Col::Owned(values) => values,
+            Col::Mapped(..) => unreachable!(),
+        }
+    }
+}
+
+impl<T> From<Vec<T>> for Col<T> {
+    fn from(values: Vec<T>) -> Self {
+        Col::Owned(values)
+    }
+}
 
 /// Parent id of a root entry.
 pub const NO_PARENT: u32 = u32::MAX;
@@ -15,14 +107,18 @@ const MAGIC: &[u8; 8] = b"FFIDX\x00\x00\x01";
 /// always has a smaller id than its children.
 pub struct Index {
     /// All names back to back; entry `i` is `names[offs[i]..offs[i + 1]]`.
-    pub(crate) names: Vec<u8>,
-    pub(crate) offs: Vec<u32>,
-    pub(crate) parent: Vec<u32>,
-    pub(crate) size: Vec<u64>,
-    pub(crate) mtime: Vec<i64>,
-    pub(crate) flags: Vec<u8>,
+    pub(crate) names: Col<u8>,
+    pub(crate) offs: Col<u32>,
+    pub(crate) parent: Col<u32>,
+    pub(crate) size: Col<u64>,
+    pub(crate) mtime: Col<i64>,
+    pub(crate) flags: Col<u8>,
     /// Directories that were skipped when building (absolute paths).
     pub(crate) excludes: Vec<Vec<u8>>,
+    /// The file the mapped columns point into, if any: held only to keep
+    /// it mapped for as long as they are used.
+    #[allow(dead_code)]
+    map: Option<Arc<Map>>,
 }
 
 impl Default for Index {
@@ -34,13 +130,14 @@ impl Default for Index {
 impl Index {
     pub fn new() -> Self {
         Index {
-            names: Vec::new(),
-            offs: vec![0],
-            parent: Vec::new(),
-            size: Vec::new(),
-            mtime: Vec::new(),
-            flags: Vec::new(),
+            names: Vec::new().into(),
+            offs: vec![0].into(),
+            parent: Vec::new().into(),
+            size: Vec::new().into(),
+            mtime: Vec::new().into(),
+            flags: Vec::new().into(),
             excludes: Vec::new(),
+            map: None,
         }
     }
 
@@ -150,18 +247,46 @@ impl Index {
         let id = self.len();
         let end = self.names.len() + name.len();
         assert!(id < NO_PARENT as usize && end <= u32::MAX as usize, "index full");
-        self.names.extend_from_slice(name);
-        self.offs.push(end as u32);
-        self.parent.push(parent);
-        self.size.push(size);
-        self.mtime.push(mtime);
-        self.flags.push(flags);
+        self.names.to_mut().extend_from_slice(name);
+        self.offs.to_mut().push(end as u32);
+        self.parent.to_mut().push(parent);
+        self.size.to_mut().push(size);
+        self.mtime.to_mut().push(mtime);
+        self.flags.to_mut().push(flags);
         id as u32
+    }
+
+    /// Sets an entry's size and modification time.
+    pub(crate) fn set_meta(&mut self, id: u32, size: u64, mtime: i64) {
+        self.size.to_mut()[id as usize] = size;
+        self.mtime.to_mut()[id as usize] = mtime;
+    }
+
+    /// Gives back memory reserved for growth; worth it once a large index
+    /// is complete.
+    pub fn shrink(&mut self) {
+        self.names.to_mut().shrink_to_fit();
+        self.offs.to_mut().shrink_to_fit();
+        self.parent.to_mut().shrink_to_fit();
+        self.size.to_mut().shrink_to_fit();
+        self.mtime.to_mut().shrink_to_fit();
+        self.flags.to_mut().shrink_to_fit();
+    }
+
+    /// Makes room for `entries` more entries with `name_bytes` of names.
+    fn reserve(&mut self, entries: usize, name_bytes: usize) {
+        self.names.to_mut().reserve_exact(name_bytes);
+        self.offs.to_mut().reserve_exact(entries);
+        self.parent.to_mut().reserve_exact(entries);
+        self.size.to_mut().reserve_exact(entries);
+        self.mtime.to_mut().reserve_exact(entries);
+        self.flags.to_mut().reserve_exact(entries);
     }
 
     /// Adds all of `other`'s entries (its roots become extra roots here).
     pub fn append(&mut self, other: &Index) {
         let shift = self.len() as u32;
+        self.reserve(other.len(), other.names.len());
         for id in 0..other.len() {
             let parent = match other.parent[id] {
                 NO_PARENT => NO_PARENT,
@@ -211,16 +336,16 @@ impl Index {
         for v in [self.len(), self.names.len(), self.excludes.len()] {
             w.write_all(&(v as u32).to_le_bytes())?;
         }
-        for v in &self.offs {
+        for v in self.offs.iter() {
             w.write_all(&v.to_le_bytes())?;
         }
-        for v in &self.parent {
+        for v in self.parent.iter() {
             w.write_all(&v.to_le_bytes())?;
         }
-        for v in &self.size {
+        for v in self.size.iter() {
             w.write_all(&v.to_le_bytes())?;
         }
-        for v in &self.mtime {
+        for v in self.mtime.iter() {
             w.write_all(&v.to_le_bytes())?;
         }
         w.write_all(&self.flags)?;
@@ -234,14 +359,35 @@ impl Index {
 
     /// Loads an index written by [`Index::save`]. The file is validated, so a
     /// truncated or corrupt file yields an error rather than a bad index.
+    ///
+    /// The file is mapped rather than read: its contents are used in place,
+    /// so loading costs no memory of our own, and programs that load the
+    /// same file share one copy. Saving writes a new file and renames it
+    /// over the old one, which leaves an index loaded earlier untouched.
     pub fn load(path: impl AsRef<Path>) -> io::Result<Index> {
-        let data = fs::read(path)?;
-        Self::parse(&data).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "not a valid ff index (rebuild it)")
-        })
+        let invalid = || io::Error::new(io::ErrorKind::InvalidData, "not a valid ff index (rebuild it)");
+        match Map::open(path.as_ref()) {
+            Ok(map) => {
+                let map = Arc::new(map);
+                Self::parse(map.bytes(), Some(&map)).ok_or_else(invalid)
+            }
+            // Something that cannot be mapped (a pipe, an odd filesystem).
+            Err(_) => Self::parse(&fs::read(path)?, None).ok_or_else(invalid),
+        }
     }
 
-    fn parse(data: &[u8]) -> Option<Index> {
+    /// With `map` (whose bytes `data` must be), columns point into it
+    /// where the machine can use the file's numbers as they are.
+    fn parse(data: &[u8], map: Option<&Arc<Map>>) -> Option<Index> {
+        fn col<T: Copy, const N: usize>(bytes: &[u8], mapped: bool, f: fn([u8; N]) -> T) -> Col<T> {
+            let at = bytes.as_ptr() as *const T;
+            if mapped && cfg!(target_endian = "little") && at.is_aligned() {
+                Col::Mapped(at, bytes.len() / N)
+            } else {
+                Col::Owned(le(bytes, f))
+            }
+        }
+        let mapped = map.is_some();
         let mut r = Reader(data);
         if r.take(8)? != MAGIC {
             return None;
@@ -250,12 +396,12 @@ impl Index {
         let names_len = r.u32()? as usize;
         let n_excl = r.u32()? as usize;
 
-        let offs: Vec<u32> = le(r.take((n + 1) * 4)?, u32::from_le_bytes);
-        let parent: Vec<u32> = le(r.take(n * 4)?, u32::from_le_bytes);
-        let size: Vec<u64> = le(r.take(n * 8)?, u64::from_le_bytes);
-        let mtime: Vec<i64> = le(r.take(n * 8)?, i64::from_le_bytes);
-        let flags = r.take(n)?.to_vec();
-        let names = r.take(names_len)?.to_vec();
+        let offs: Col<u32> = col(r.take((n + 1) * 4)?, mapped, u32::from_le_bytes);
+        let parent: Col<u32> = col(r.take(n * 4)?, mapped, u32::from_le_bytes);
+        let size: Col<u64> = col(r.take(n * 8)?, mapped, u64::from_le_bytes);
+        let mtime: Col<i64> = col(r.take(n * 8)?, mapped, i64::from_le_bytes);
+        let flags: Col<u8> = col(r.take(n)?, mapped, u8::from_le_bytes);
+        let names: Col<u8> = col(r.take(names_len)?, mapped, u8::from_le_bytes);
         let mut excludes = Vec::new();
         for _ in 0..n_excl {
             let len = r.u32()? as usize;
@@ -269,7 +415,7 @@ impl Index {
             .iter()
             .enumerate()
             .all(|(i, &p)| p == NO_PARENT || (p as usize) < i);
-        (offs_ok && parents_ok).then_some(Index { names, offs, parent, size, mtime, flags, excludes })
+        (offs_ok && parents_ok).then(|| Index { names, offs, parent, size, mtime, flags, excludes, map: map.cloned() })
     }
 }
 

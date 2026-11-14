@@ -56,7 +56,7 @@ pub fn trf(template: &str, values: &[&dyn std::fmt::Display]) -> String {
 }
 
 /// English text and its [French, Spanish, Italian] translations.
-const TEXTS: [(&str, [&str; 3]); 240] = [
+const TEXTS: [(&str, [&str; 3]); 249] = [
     ("File", ["Fichier", "Archivo", "File"]),
     ("Edit", ["Édition", "Editar", "Modifica"]),
     ("View", ["Affichage", "Ver", "Visualizza"]),
@@ -297,6 +297,15 @@ const TEXTS: [(&str, [&str; 3]); 240] = [
     ("rebuild the index", ["reconstruire l'index", "reconstruir el índice", "ricostruisci l'indice"]),
     ("zoom in, out, reset", ["zoom avant, arrière, réinitialiser", "acercar, alejar, restablecer", "ingrandisci, riduci, reimposta"]),
     ("clear the search box; quit when it is empty", ["vider la zone de recherche ; quitter si elle est vide", "vaciar el cuadro de búsqueda; salir si está vacío", "svuota la casella di ricerca; esci se è vuota"]),
+    ("Folder sizes", ["Taille des dossiers", "Tamaño de las carpetas", "Dimensione delle cartelle"]),
+    ("Files", ["Fichiers", "Archivos", "File"]),
+    ("Share", ["Part", "Parte", "Quota"]),
+    ("{} files", ["{} fichiers", "{} archivos", "{} file"]),
+    ("Esc: back to the search", ["Échap : retour à la recherche", "Esc: volver a la búsqueda", "Esc: torna alla ricerca"]),
+    ("This folder is empty", ["Ce dossier est vide", "Esta carpeta está vacía", "Questa cartella è vuota"]),
+    ("Everything in this folder is empty", ["Tout le contenu de ce dossier est vide", "Todo en esta carpeta está vacío", "Tutto in questa cartella è vuoto"]),
+    ("The index is empty", ["L'index est vide", "El índice está vacío", "L'indice è vuoto"]),
+    ("folder sizes: what takes the space", ["taille des dossiers : ce qui occupe l'espace", "tamaño de las carpetas: qué ocupa el espacio", "dimensione delle cartelle: cosa occupa lo spazio"]),
 ];
 
 #[cfg(test)]

@@ -20,6 +20,9 @@ pub struct LiveIndex {
     index: Index,
     /// Full path of every indexed directory -> its entry id.
     dirs: HashMap<Vec<u8>, u32>,
+    /// Names of roots that never change (drives read directly while not
+    /// mounted): their directories are left out of `dirs`.
+    fixed_roots: Vec<Vec<u8>>,
 }
 
 fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
@@ -33,7 +36,13 @@ fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
 
 impl LiveIndex {
     pub fn new(index: Index) -> LiveIndex {
-        let mut live = LiveIndex { index, dirs: HashMap::new() };
+        Self::with_fixed_roots(index, Vec::new())
+    }
+
+    /// As `new`, for an index where the roots with these names cannot
+    /// change, so nothing needs to be remembered about them.
+    pub fn with_fixed_roots(index: Index, fixed_roots: Vec<Vec<u8>>) -> LiveIndex {
+        let mut live = LiveIndex { index, dirs: HashMap::new(), fixed_roots };
         live.rebuild_dirs();
         live
     }
@@ -49,12 +58,21 @@ impl LiveIndex {
     fn rebuild_dirs(&mut self) {
         self.dirs.clear();
         let mut path = Vec::new();
+        // Whether each entry is under a fixed root; parents come first.
+        let mut fixed = vec![false; if self.fixed_roots.is_empty() { 0 } else { self.index.len() }];
+        for id in 0..fixed.len() {
+            fixed[id] = match self.index.parent[id] {
+                crate::index::NO_PARENT => self.fixed_roots.iter().any(|root| root == self.index.name(id as u32)),
+                parent => fixed[parent as usize],
+            };
+        }
         for id in 0..self.index.len() as u32 {
-            if self.index.flags[id as usize] == FLAG_DIR {
+            if self.index.flags[id as usize] == FLAG_DIR && !fixed.get(id as usize).copied().unwrap_or(false) {
                 self.index.write_path(id, &mut path);
                 self.dirs.insert(path.clone(), id);
             }
         }
+        self.dirs.shrink_to_fit();
     }
 
     /// True if `path` is an excluded directory or inside one.
@@ -114,7 +132,7 @@ impl LiveIndex {
                 (Some(md), Some(id)) if flags == Some(self.index.flags[id as usize]) => {
                     let i = id as usize;
                     changed |= (self.index.size[i], self.index.mtime[i]) != (md.size(), md.mtime());
-                    (self.index.size[i], self.index.mtime[i]) = (md.size(), md.mtime());
+                    self.index.set_meta(id, md.size(), md.mtime());
                 }
                 (md, old) => {
                     changed |= md.is_some() || old.is_some();
@@ -227,6 +245,19 @@ mod tests {
         let db = root.join("index.db");
         live.index().save(&db).unwrap();
         assert_eq!(Index::load(&db).unwrap().len(), live.index().len());
+
+        // A loaded index is mapped from its file; changing it must still
+        // work, and must leave the file as it was.
+        let saved = fs::read(&db).unwrap();
+        let mut loaded = LiveIndex::new(Index::load(&db).unwrap());
+        fs::write(root.join("after-load.txt"), "z").unwrap();
+        assert!(loaded.apply(&change(&root_bytes, "after-load.txt")));
+        assert_eq!(count(&loaded, "after-load.txt"), 1);
+        assert_eq!(count(&loaded, "old.txt keep/"), 1);
+        fs::remove_file(root.join("keep/old.txt")).unwrap();
+        assert!(loaded.apply(&change(&join(&root_bytes, b"keep"), "old.txt")));
+        assert_eq!(count(&loaded, "old.txt"), 0);
+        assert_eq!(fs::read(&db).unwrap(), saved);
         fs::remove_dir_all(&root).unwrap();
     }
 }

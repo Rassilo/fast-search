@@ -7,7 +7,7 @@
 
 mod sys;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -303,10 +303,7 @@ fn serve(cfg: &Config) -> Result<(), String> {
         std::thread::spawn(move || read_events(group, mount_dirs, tx));
     }
 
-    // Drives read directly are remembered: an unmounted drive does not
-    // change, and reading a large one takes a while.
-    let mut raw_cache: HashMap<String, Index> = HashMap::new();
-    let mut scan = |why: &str, plan: &Plan| -> Result<LiveIndex, String> {
+    let scan = |why: &str, plan: &Plan| -> Result<LiveIndex, String> {
         let start = Instant::now();
         // Start watching before the scan so nothing that changes during
         // it is missed; those events are applied once the scan is done.
@@ -315,27 +312,27 @@ fn serve(cfg: &Config) -> Result<(), String> {
         opts.excludes = cfg.opts.excludes.iter().chain(&plan.excludes).cloned().collect();
         opts.skip_hidden = cfg.opts.skip_hidden;
         let mut index = Index::build(&opts).map_err(|e| e.to_string())?;
-        raw_cache.retain(|device, _| plan.raw.contains(device));
+        // Drives read directly are read again on every scan: keeping a
+        // copy would cost as much memory as the drive's whole index, and
+        // reading one takes seconds.
         for device in &plan.raw {
-            if !raw_cache.contains_key(device) {
-                let read_start = Instant::now();
-                match ff_core::rawfs::scan(Path::new(device), device.as_bytes()) {
-                    Ok(read) => {
-                        log(format!("read {device} directly: {} entries in {:.2}s", read.len(), read_start.elapsed().as_secs_f64()));
-                        raw_cache.insert(device.clone(), read);
-                    }
-                    Err(e) => log(format!("cannot read {device} directly: {e}")),
+            let read_start = Instant::now();
+            match ff_core::rawfs::scan(Path::new(device), device.as_bytes()) {
+                Ok(read) => {
+                    log(format!("read {device} directly: {} entries in {:.2}s", read.len(), read_start.elapsed().as_secs_f64()));
+                    index.append(&read);
                 }
-            }
-            if let Some(read) = raw_cache.get(device) {
-                index.append(read);
+                Err(e) => log(format!("cannot read {device} directly: {e}")),
             }
         }
+        index.shrink();
         for skipped in &plan.excludes {
             log(format!("not indexing {} (drive is switched off)", skipped.display()));
         }
         log(format!("{why}: {} entries in {:.2}s", index.len(), start.elapsed().as_secs_f64()));
-        Ok(LiveIndex::new(index))
+        // Nothing changes on those drives, so they need no live bookkeeping.
+        let fixed = plan.raw.iter().map(|device| device.as_bytes().to_vec()).collect();
+        Ok(LiveIndex::with_fixed_roots(index, fixed))
     };
 
     let mut current = current_plan(cfg)?;

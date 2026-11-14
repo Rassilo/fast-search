@@ -159,8 +159,29 @@ applications menu.
 | Help: search syntax, filters and shortcuts with examples | F1 |
 | Regular expressions / whole words | Ctrl+R / Ctrl+B |
 | Rebuild the index | F5 |
+| Folder sizes: what takes the space | F6, or View → Folder sizes |
 | Sort | click a column header; again to reverse |
 | Clear, then quit | Esc |
+
+### Folder sizes
+
+F6 swaps the results for a view of what takes the space. On the left is
+a tree of folders with their total size, number of files and share of
+the folder above, largest first. On the right is a map of the selected
+folder in which each tile's area is its size. It is computed from the
+index, so it appears at once and reads nothing from the disk.
+
+| Action | Key or mouse |
+|---|---|
+| Open or close a folder | Right / Left, Enter, double-click, or its arrow |
+| Go to the folder above | Backspace, or Left on a closed folder |
+| Go into a folder of the map | click its tile |
+| Show in file manager / properties / trash | Ctrl+Enter / Alt+Enter / Del, or right-click |
+| Back to the search | Esc or F6, or just type |
+
+Opened from a search, the view starts at the selected result. Sizes are
+the files' lengths as stored in the index, not the space allocated on
+disk, and a file with several hard links is counted once per link.
 
 The window reloads the index by itself whenever the index file changes,
 so results follow `ff index` runs and the daemon.

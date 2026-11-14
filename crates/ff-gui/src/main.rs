@@ -6,6 +6,7 @@ mod debug;
 mod dialog;
 mod i18n;
 mod settings;
+mod tree;
 mod wayland;
 mod x11;
 mod x11_backend;
@@ -62,6 +63,8 @@ KEYS:
   F3                 case: smart / sensitive / insensitive
   Ctrl+R, Ctrl+B     regular expressions / whole words only
   F5                 rebuild the index (not needed while ffd runs)
+  F6                 folder sizes: a tree and a map of what takes the space
+                     (arrows and Enter open folders, Esc goes back)
   click a column     sort by it (again to reverse)
   Esc                clear the search box, or quit when it is empty
 
@@ -141,6 +144,8 @@ enum Action {
     Show(Kind),
     Case(CaseMode),
     Reindex,
+    /// The folder sizes view.
+    TreeSize,
     About,
     Quit,
     ZoomIn,
@@ -247,6 +252,7 @@ const BAR: [(&str, Items); 5] = [
             ("Case insensitive", "", Action::Case(CaseMode::Insensitive)),
             ("Regular expressions", "Ctrl+R", Action::ToggleRegex),
             ("Whole words only", "Ctrl+B", Action::ToggleWord),
+            ("Folder sizes", "F6", Action::TreeSize),
         ],
     ),
     (
@@ -393,6 +399,11 @@ struct App {
     /// That drop was a move, so the files leave the results when it ends.
     drop_moved: bool,
     last_click: (u32, usize),
+    /// The folder sizes view, while it is open instead of the results.
+    tree: Option<tree::Tree>,
+    /// The tiles of its map as last drawn, and the one under the pointer.
+    tiles: Vec<tree::Tile>,
+    tile_hover: Option<u32>,
 }
 
 fn main() -> ExitCode {
@@ -582,6 +593,9 @@ impl App {
             options_page: None,
             drives: Vec::new(),
             pending_build: None,
+            tree: None,
+            tiles: Vec::new(),
+            tile_hover: None,
             drive_selected: 0,
             auto_drives: true,
             pending_paths: Vec::new(),
@@ -713,12 +727,15 @@ impl App {
                 self.act(Action::CopyFile, 123_456_789);
                 return Ok(());
             }
+            Ok("reindex") => self.reindex()?,
+            Ok("tree") => self.toggle_tree(),
             Ok("options") => self.open_bar_menu(3),
             Ok("props") => self.act(Action::Properties, 0),
             Ok("select") => self.anchor = self.step(self.cursor, false, true),
             _ => {}
         }
         let mut dirty = true;
+        let mut shown = (String::new(), Instant::now());
         loop {
             if self.quit {
                 return Ok(());
@@ -729,6 +746,18 @@ impl App {
                 // A background job ended: a preferences dialog may be stale.
                 self.refresh_option_states();
                 self.render_dialog()?;
+            }
+            // A message in the status bar goes away by itself, unless it
+            // reports something still going on.
+            if self.status != shown.0 {
+                shown = (self.status.clone(), Instant::now());
+            } else if !self.status.is_empty()
+                && shown.1.elapsed() >= Duration::from_secs(6)
+                && self.dragging.is_none()
+                && self.status != tr("Waiting for authorization...")
+            {
+                self.status.clear();
+                dirty = true;
             }
             // Redraw only once the event queue is drained.
             // While idle, wake once a second to notice a refreshed index.
@@ -800,8 +829,10 @@ impl App {
                     dirty = true;
                 }
                 Event::Scroll { lines, .. } => {
-                    let top = self.top.saturating_add_signed(lines as isize).min(self.max_top());
-                    dirty |= std::mem::replace(&mut self.top, top) != top;
+                    let max = self.max_top();
+                    let at = self.top_mut();
+                    let top = at.saturating_add_signed(lines as isize).min(max);
+                    dirty |= std::mem::replace(at, top) != top;
                 }
                 Event::Release { button: 1, .. } => {
                     self.dragging_scrollbar = false;
@@ -1001,7 +1032,9 @@ impl App {
         }
         let Ok(index) = Index::load(&self.db) else { return false }; // mid-rewrite: retry next tick
         self.db_stamp = stamp;
+        let kept = self.keep_tree();
         self.index = index;
+        self.restore_tree(kept);
         let (sel, top) = (self.sel, self.top);
         self.search();
         self.sel = sel.min(self.hits.len().saturating_sub(1));
@@ -1024,7 +1057,9 @@ impl App {
                     Err(e) => format!("could not save the index: {e}"),
                 };
                 self.db_stamp = std::fs::metadata(&self.db).and_then(|m| m.modified()).ok();
+                let kept = self.keep_tree();
                 self.index = index;
+                self.restore_tree(kept);
             }
             Err(e) => self.status = format!("indexing failed: {e}"),
         }
@@ -1034,6 +1069,13 @@ impl App {
 
     /// Runs a menu or keyboard action.
     fn act(&mut self, action: Action, time: u32) {
+        // In the folder sizes view, the actions on a result are for the
+        // entry selected there.
+        use Action::*;
+        if self.tree.is_some() && matches!(action, Open | Reveal | Edit | CopyFile | CopyPath | CopyName | Copy | Properties | Trash | DeleteForever) {
+            self.on_tree_target(|app| app.act(action, time));
+            return;
+        }
         // First the actions that do not need a selected result.
         let (a, b) = self.selection();
         match action {
@@ -1065,6 +1107,7 @@ impl App {
                 self.save_config();
                 return self.search();
             }
+            Action::TreeSize => return self.toggle_tree(),
             Action::Reindex => {
                 if let Err(e) = self.reindex() {
                     self.status = e.to_string();
@@ -1612,6 +1655,7 @@ impl App {
                     pair("Ctrl+R, Ctrl+B", "regular expressions, whole words"),
                     pair("F2, F3", "files or folders, letter case"),
                     pair("F5", "rebuild the index"),
+                    pair("F6", "folder sizes: what takes the space"),
                     pair("Ctrl +, Ctrl -, Ctrl 0", "zoom in, out, reset"),
                     pair("Esc", "clear the search box; quit when it is empty"),
                 ],
@@ -1645,9 +1689,11 @@ impl App {
             .filter_map(|p| Some((p.parent()?.as_os_str().as_bytes().to_vec(), p.file_name()?.as_bytes().to_vec())))
             .collect();
         // Checks the disk: an entry only goes if the file really is gone.
+        let kept = self.keep_tree();
         let mut live = ff_core::live::LiveIndex::new(std::mem::take(&mut self.index));
         live.apply(&changes);
         self.index = live.into_index();
+        self.restore_tree(kept);
         let (sel, top) = (self.sel, self.top);
         self.search();
         self.sel = sel.min(self.hits.len().saturating_sub(1));
@@ -1742,6 +1788,7 @@ impl App {
             Action::DriveIndex(i) => self.drives.get(i as usize).is_some_and(|d| d.index),
             Action::DriveLive(i) => self.drives.get(i as usize).is_some_and(|d| d.live && d.index),
             Action::ToggleWord => self.whole_word,
+            Action::TreeSize => self.tree.is_some(),
             Action::Case(case) => case == self.case,
             Action::ToggleTitleBar => self.custom_title,
             Action::ToggleShortcut => self.shortcut_on,
@@ -1918,8 +1965,21 @@ impl App {
         ((self.cv.h as i32 - self.list_top() - self.row_h()) / self.row_h()).max(1) as usize
     }
 
+    /// Rows in the list shown: the results, or the folder sizes tree.
+    fn list_len(&self) -> usize {
+        self.tree.as_ref().map_or(self.hits.len(), |t| t.rows.len())
+    }
+
+    /// The first visible row of that list.
+    fn top_mut(&mut self) -> &mut usize {
+        match &mut self.tree {
+            Some(tree) => &mut tree.top,
+            None => &mut self.top,
+        }
+    }
+
     fn max_top(&self) -> usize {
-        self.hits.len().saturating_sub(self.rows_visible())
+        self.list_len().saturating_sub(self.rows_visible())
     }
 
     fn is_selected(&self, row: usize) -> bool {
@@ -2006,6 +2066,9 @@ impl App {
             return Ok(true);
         }
 
+        if let Some(done) = self.tree_key(key, mods) {
+            return done;
+        }
         let (ctrl, alt, shift) = (mods.ctrl, mods.alt, mods.shift);
         let page = self.rows_visible() as isize;
         let (sel_start, sel_end) = self.selection();
@@ -2095,6 +2158,7 @@ impl App {
             Key::Sym(K_F1) => self.act(Action::Help(0), time),
             Key::Sym(K_F4) => self.act(Action::Edit, time),
             Key::Sym(K_F5) => self.reindex()?,
+            Key::Sym(K_F6) => self.toggle_tree(),
             _ => {}
         }
         Ok(true)
@@ -2122,6 +2186,9 @@ impl App {
         }
         if button == 1 && self.press_frame(x, y, time) {
             return;
+        }
+        if self.tree.is_some() && y >= self.menu_h() {
+            return self.tree_press(button, x, y, time);
         }
         let in_scrollbar = x >= self.cv.w as i32 - self.bar_w() && y >= self.list_top();
         match button {
@@ -2237,6 +2304,11 @@ impl App {
             self.dragging = Some(label);
             return Ok(true);
         }
+        if self.tree.is_some() {
+            self.hover_row = None;
+            let changed = self.tree_motion(x, y);
+            return Ok(self.motion_inner(x, y) | changed);
+        }
         let hover = self.row_at(y).filter(|_| self.flag(Flag::RowHover) && x < self.cv.w as i32 - self.bar_w());
         let hover_changed = std::mem::replace(&mut self.hover_row, hover) != hover;
         Ok(self.motion_inner(x, y) | hover_changed)
@@ -2244,9 +2316,9 @@ impl App {
 
     fn motion_inner(&mut self, x: i32, y: i32) -> bool {
         if self.dragging_scrollbar {
-            let before = self.top;
+            let before = *self.top_mut();
             self.scroll_to(y);
-            return self.top != before;
+            return *self.top_mut() != before;
         }
         if self.selecting {
             let query = self.query.clone();
@@ -2275,7 +2347,7 @@ impl App {
         let (track, thumb) = self.scrollbar();
         let span = (track - thumb).max(1) as i64;
         let pos = ((y - self.list_top() - thumb / 2) as i64).clamp(0, span);
-        self.top = (pos * self.max_top() as i64 / span) as usize;
+        *self.top_mut() = (pos * self.max_top() as i64 / span) as usize;
     }
 
     // ---- layout --------------------------------------------------------
@@ -2323,7 +2395,7 @@ impl App {
     fn scrollbar(&self) -> (i32, i32) {
         let rows = self.rows_visible();
         let track = rows as i32 * self.row_h();
-        let thumb = (track as i64 * rows as i64 / self.hits.len().max(1) as i64).max(24 * self.u as i64);
+        let thumb = (track as i64 * rows as i64 / self.list_len().max(1) as i64).max(24 * self.u as i64);
         (track, (thumb as i32).min(track))
     }
 
@@ -2373,94 +2445,100 @@ impl App {
             }
             self.text.draw(&mut self.cv, x + 9 * u, th + 3 * u, tr(BAR[i].0), tw, TEXT);
         }
-        let query = self.query.clone();
-        let room = (w - 28 * u).max(4 * u);
-        let caret = self.text.width(&query[..self.cursor]);
-        let max_scroll = (self.text.width(&query) + 2 * u - room).max(0);
-        self.box_scroll = self.box_scroll.clamp((caret + 2 * u - room).max(0), caret).min(max_scroll);
-        let (tx, ty) = (self.box_text_x(), top + 10 * u);
-        let box_clip = (14 * u, 14 * u + room);
-        self.cv.clip = box_clip;
-        self.text.draw(&mut self.cv, tx, ty, &query, i32::MAX / 2, TEXT);
-        let (a, b) = self.selection();
-        if a != b {
-            let (xa, xb) = (tx + self.text.width(&query[..a]), tx + self.text.width(&query[..b]));
-            self.cv.clip = (xa.max(box_clip.0), xb.min(box_clip.1));
-            self.cv.fill(xa, ty - u, xb - xa, self.text.height + 2 * u, SELECT);
-            self.text.draw(&mut self.cv, tx, ty, &query, i32::MAX / 2, ON_ACCENT);
+        if self.tree.is_some() {
+            self.draw_tree();
+        } else {
+            let query = self.query.clone();
+            let room = (w - 28 * u).max(4 * u);
+            let caret = self.text.width(&query[..self.cursor]);
+            let max_scroll = (self.text.width(&query) + 2 * u - room).max(0);
+            self.box_scroll = self.box_scroll.clamp((caret + 2 * u - room).max(0), caret).min(max_scroll);
+            let (tx, ty) = (self.box_text_x(), top + 10 * u);
+            let box_clip = (14 * u, 14 * u + room);
             self.cv.clip = box_clip;
-        }
-        self.cv.fill(tx + caret, ty, u.max(1), self.text.height, TEXT);
-        self.cv.clip = (0, i32::MAX);
-
-        // Column headers with the sort direction.
-        let y = self.box_h();
-        self.cv.fill(0, y, w, row_h, PANEL);
-        self.cv.fill(0, y + row_h, w, 1, LINE);
-        let heads = [("Name", Sort::Name), ("Path", Sort::Path), ("Size", Sort::Size), ("Modified", Sort::Mtime)];
-        for (i, ((label, sort), (x, cw))) in heads.into_iter().zip(cols).enumerate() {
-            let mark = if self.sort != sort { "" } else if self.reverse { "  ▼" } else { "  ▲" };
-            if i > 0 {
-                self.cv.fill(x, y + 4 * u, 1, row_h - 8 * u, LINE);
+            self.text.draw(&mut self.cv, tx, ty, &query, i32::MAX / 2, TEXT);
+            let (a, b) = self.selection();
+            if a != b {
+                let (xa, xb) = (tx + self.text.width(&query[..a]), tx + self.text.width(&query[..b]));
+                self.cv.clip = (xa.max(box_clip.0), xb.min(box_clip.1));
+                self.cv.fill(xa, ty - u, xb - xa, self.text.height + 2 * u, SELECT);
+                self.text.draw(&mut self.cv, tx, ty, &query, i32::MAX / 2, ON_ACCENT);
+                self.cv.clip = box_clip;
             }
-            self.text.draw(&mut self.cv, x + pad, y + 3 * u, &format!("{}{mark}", tr(label)), cw - 2 * pad, TEXT);
-        }
+            self.cv.fill(tx + caret, ty, u.max(1), self.text.height, TEXT);
+            self.cv.clip = (0, i32::MAX);
 
-        // Result rows.
-        let rows = self.rows_visible();
-        let list_top = self.list_top();
-        let icon = self.icons.size as i32;
-        let mut path = Vec::new();
-        for row in 0..rows {
-            let Some(&id) = self.hits.get(self.top + row) else { break };
-            let y = list_top + row as i32 * row_h;
-            let selected = self.is_selected(self.top + row);
-            let (fg, dim) = if selected { (ON_ACCENT, ON_ACCENT) } else { (TEXT, DIM) };
-            if selected {
-                self.cv.fill(0, y, w - bar, row_h, SELECT);
-            } else if self.hover_row == Some(self.top + row) {
-                self.cv.fill(0, y, w - bar, row_h, 0xe6f0fc);
-            } else if self.flag(Flag::AltRows) && (self.top + row) % 2 == 1 {
-                self.cv.fill(0, y, w - bar, row_h, 0xf5f7f9);
-            }
-            let is_dir = self.index.is_dir(id);
-            let name = String::from_utf8_lossy(self.index.name(id)).into_owned();
-            let parent = match self.index.parent(id) {
-                Some(p) => {
-                    self.index.write_path(p, &mut path);
-                    String::from_utf8_lossy(&path).into_owned()
+            // Column headers with the sort direction.
+            let y = self.box_h();
+            self.cv.fill(0, y, w, row_h, PANEL);
+            self.cv.fill(0, y + row_h, w, 1, LINE);
+            let heads = [("Name", Sort::Name), ("Path", Sort::Path), ("Size", Sort::Size), ("Modified", Sort::Mtime)];
+            for (i, ((label, sort), (x, cw))) in heads.into_iter().zip(cols).enumerate() {
+                let mark = if self.sort != sort { "" } else if self.reverse { "  ▼" } else { "  ▲" };
+                if i > 0 {
+                    self.cv.fill(x, y + 4 * u, 1, row_h - 8 * u, LINE);
                 }
-                None => String::new(),
-            };
-            let kind = Icon::of(self.index.name(id), is_dir, self.index.is_symlink(id));
-            self.icons.draw(&mut self.cv, cols[0].0 + pad, y + (row_h - icon) / 2, kind);
-            let ty = y + 3 * u;
-            let name_x = cols[0].0 + pad + icon + 6 * u;
-            self.text.draw(&mut self.cv, name_x, ty, &name, cols[0].0 + cols[0].1 - pad - name_x, fg);
-            self.text.draw(&mut self.cv, cols[1].0 + pad, ty, &parent, cols[1].1 - 2 * pad, dim);
-            if !is_dir {
-                let size = self.size_text(self.index.size(id));
-                let x = cols[2].0 + cols[2].1 - pad - self.text.width(&size);
-                self.text.draw(&mut self.cv, x, ty, &size, cols[2].1, fg);
+                self.text.draw(&mut self.cv, x + pad, y + 3 * u, &format!("{}{mark}", tr(label)), cw - 2 * pad, TEXT);
             }
-            let (yr, mo, d, hh, mm) = ff_core::local_civil(self.index.mtime(id));
-            let date = format!("{yr:04}-{mo:02}-{d:02} {hh:02}:{mm:02}");
-            self.text.draw(&mut self.cv, cols[3].0 + pad, ty, &date, cols[3].1 - pad, dim);
-        }
 
-        // Scrollbar.
-        if self.hits.len() > rows {
-            let (track, thumb) = self.scrollbar();
-            let pos = ((track - thumb) as i64 * self.top as i64 / self.max_top().max(1) as i64) as i32;
-            self.cv.fill(w - bar, list_top, bar, track, PANEL);
-            self.cv.fill(w - bar + 2 * u, list_top + pos, bar - 4 * u, thumb, 0xa6a6a6);
+            // Result rows.
+            let rows = self.rows_visible();
+            let list_top = self.list_top();
+            let icon = self.icons.size as i32;
+            let mut path = Vec::new();
+            for row in 0..rows {
+                let Some(&id) = self.hits.get(self.top + row) else { break };
+                let y = list_top + row as i32 * row_h;
+                let selected = self.is_selected(self.top + row);
+                let (fg, dim) = if selected { (ON_ACCENT, ON_ACCENT) } else { (TEXT, DIM) };
+                if selected {
+                    self.cv.fill(0, y, w - bar, row_h, SELECT);
+                } else if self.hover_row == Some(self.top + row) {
+                    self.cv.fill(0, y, w - bar, row_h, 0xe6f0fc);
+                } else if self.flag(Flag::AltRows) && (self.top + row) % 2 == 1 {
+                    self.cv.fill(0, y, w - bar, row_h, 0xf5f7f9);
+                }
+                let is_dir = self.index.is_dir(id);
+                let name = String::from_utf8_lossy(self.index.name(id)).into_owned();
+                let parent = match self.index.parent(id) {
+                    Some(p) => {
+                        self.index.write_path(p, &mut path);
+                        String::from_utf8_lossy(&path).into_owned()
+                    }
+                    None => String::new(),
+                };
+                let kind = Icon::of(self.index.name(id), is_dir, self.index.is_symlink(id));
+                self.icons.draw(&mut self.cv, cols[0].0 + pad, y + (row_h - icon) / 2, kind);
+                let ty = y + 3 * u;
+                let name_x = cols[0].0 + pad + icon + 6 * u;
+                self.text.draw(&mut self.cv, name_x, ty, &name, cols[0].0 + cols[0].1 - pad - name_x, fg);
+                self.text.draw(&mut self.cv, cols[1].0 + pad, ty, &parent, cols[1].1 - 2 * pad, dim);
+                if !is_dir {
+                    let size = self.size_text(self.index.size(id));
+                    let x = cols[2].0 + cols[2].1 - pad - self.text.width(&size);
+                    self.text.draw(&mut self.cv, x, ty, &size, cols[2].1, fg);
+                }
+                let (yr, mo, d, hh, mm) = ff_core::local_civil(self.index.mtime(id));
+                let date = format!("{yr:04}-{mo:02}-{d:02} {hh:02}:{mm:02}");
+                self.text.draw(&mut self.cv, cols[3].0 + pad, ty, &date, cols[3].1 - pad, dim);
+            }
+
+            // Scrollbar.
+            if self.hits.len() > rows {
+                let (track, thumb) = self.scrollbar();
+                let pos = ((track - thumb) as i64 * self.top as i64 / self.max_top().max(1) as i64) as i32;
+                self.cv.fill(w - bar, list_top, bar, track, PANEL);
+                self.cv.fill(w - bar + 2 * u, list_top + pos, bar - 4 * u, thumb, 0xa6a6a6);
+            }
         }
 
         // Status bar.
         let y = h - row_h;
         self.cv.fill(0, y, w, row_h, PANEL);
         self.cv.fill(0, y, w, 1, LINE);
-        let status = if self.status.is_empty() {
+        let status = if self.status.is_empty() && self.tree.is_some() {
+            self.tree_status()
+        } else if self.status.is_empty() {
             let kind = tr(["all", "files", "folders"][self.kind as usize]);
             let case = tr(["smart", "sensitive", "insensitive"][self.case as usize]);
             let objects = tr("objects");
