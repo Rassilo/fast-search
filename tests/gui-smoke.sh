@@ -94,7 +94,7 @@ export FF_GUI_BACKEND=$backend
 failed=0
 plain=
 # The first is the plain results view; the others must look different.
-for view in results menu bar about props prefs options1 options4 drives help0 regex tree complete; do
+for view in results menu bar about props prefs options1 options4 drives help0 regex tree complete bookmarks bookmark-add export; do
     picture="$work/$view.ppm"
     log="$work/$view.log"
     hook=$view
@@ -118,7 +118,7 @@ for view in results menu bar about props prefs options1 options4 drives help0 re
             # A regex search for the same word finds the same results. An
             # open menu is closed again when the compositor gives the new
             # window its size, so menus are only checked for drawing.
-            regex | menu | bar) ;;
+            regex | menu | bar | bookmarks) ;;
             *) [ "$sum" = "$plain" ] && problem="looks the same as the plain results view" ;;
         esac
     fi

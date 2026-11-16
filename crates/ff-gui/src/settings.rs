@@ -294,6 +294,29 @@ pub fn current_shortcut() -> Option<String> {
     (shortcut_enabled() && !binding.is_empty()).then(|| shortcut_label(binding))
 }
 
+/// The command the desktop runs for the shortcut, as the text `gsettings`
+/// takes: this program's path, quoted so that the desktop reads it as
+/// one word whatever it contains.
+fn shortcut_command() -> io::Result<String> {
+    let exe = launch_path()?;
+    let exe = exe.to_str().ok_or_else(|| other("the program path is not valid UTF-8"))?;
+    let word = format!("'{}'", exe.replace('\'', "'\\''"));
+    Ok(format!("\"{}\"", word.replace('\\', "\\\\").replace('"', "\\\"")))
+}
+
+/// Versions before 0.10 could save the command as "path (deleted)" when
+/// the program had been replaced while it ran; the desktop then started
+/// it with "(deleted)" as the search text. Puts the right command back.
+pub fn repair_shortcut() {
+    let ours = format!("{KEYS_SCHEMA}.custom-keybinding:{KEY_PATH}");
+    let Ok(saved) = gsettings(&["get", &ours, "command"]) else { return };
+    if saved.trim().trim_matches(['\'', '"']).ends_with(" (deleted)") {
+        if let Ok(command) = shortcut_command() {
+            let _ = gsettings(&["set", &ours, "command", &command]);
+        }
+    }
+}
+
 /// Adds the shortcut `keys` (as in "Ctrl+Alt+F") that starts this
 /// program, or removes ours. Returns the new state.
 pub fn set_shortcut(on: bool, keys: &str) -> io::Result<bool> {
@@ -302,10 +325,8 @@ pub fn set_shortcut(on: bool, keys: &str) -> io::Result<bool> {
     list.retain(|p| p != KEY_PATH);
     let ours = format!("{KEYS_SCHEMA}.custom-keybinding:{KEY_PATH}");
     if on {
-        let exe = launch_path()?;
-        let exe = exe.to_str().ok_or_else(|| other("the program path is not valid UTF-8"))?;
         gsettings(&["set", &ours, "name", "Fast search"])?;
-        gsettings(&["set", &ours, "command", exe])?;
+        gsettings(&["set", &ours, "command", &shortcut_command()?])?;
         gsettings(&["set", &ours, "binding", &binding])?;
         list.push(KEY_PATH.into());
     } else {

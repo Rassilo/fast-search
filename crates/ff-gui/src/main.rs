@@ -6,6 +6,7 @@ mod complete;
 mod debug;
 mod dialog;
 mod i18n;
+mod saved;
 mod settings;
 mod tree;
 mod wayland;
@@ -59,7 +60,10 @@ KEYS:
   drag a result      drop it on a file manager to move it there
                      (hold Ctrl to copy); also editors, upload boxes...
   Menu / right-click actions menu
-  menu bar           File, Edit, View, Options and Help at the top
+  menu bar           File, Edit, View, Bookmarks, Options and Help at the top
+  Ctrl+D             bookmark the current search (Bookmarks menu; Alt+1 to
+                     Alt+9 open the first nine)
+  Ctrl+S             export the results as a CSV file
   Ctrl+P             options
   Ctrl + / - / 0     zoom in / out / reset
   F1                 help: search syntax, filters and shortcuts with examples
@@ -152,6 +156,16 @@ enum Action {
     Reindex,
     /// The folder sizes view.
     TreeSize,
+    /// Bookmarks: ask for a name, save, open one, and the Options page.
+    AddBookmark,
+    SaveBookmark,
+    Bookmark(u8),
+    SelectBookmark(u8),
+    RaiseBookmark,
+    RemoveBookmark,
+    /// Write the results to a CSV file: ask where, then do it.
+    ExportCsv,
+    ConfirmExport,
     About,
     Quit,
     ZoomIn,
@@ -223,7 +237,7 @@ const TEXT_CONTEXT_MENU: Items = &[
 ];
 
 /// The menu bar.
-const BAR: [(&str, Items); 5] = [
+const BAR: [(&str, Items); 6] = [
     (
         "File",
         &[
@@ -233,6 +247,7 @@ const BAR: [(&str, Items); 5] = [
             ("Copy full path", "Ctrl+Shift+C", Action::CopyPath),
             ("Copy name", "", Action::CopyName),
             ("Properties", "Alt+Enter", Action::Properties),
+            ("Export results as CSV...", "Ctrl+S", Action::ExportCsv),
             ("Rebuild index", "F5", Action::Reindex),
             ("Quit", "Ctrl+Q", Action::Quit),
         ],
@@ -263,6 +278,8 @@ const BAR: [(&str, Items); 5] = [
             ("Folder sizes", "F6", Action::TreeSize),
         ],
     ),
+    // Filled in from the saved bookmarks when it opens.
+    ("Bookmarks", &[]),
     (
         "Options",
         &[
@@ -418,6 +435,11 @@ struct App {
     tile_hover: Option<u32>,
     /// The list of completions open under the search box.
     complete: Option<complete::Complete>,
+    /// Saved searches, the one selected on their Options page, and the
+    /// Bookmarks menu made from them.
+    bookmarks: Vec<saved::Bookmark>,
+    bookmark_selected: usize,
+    bookmark_items: Items,
 }
 
 fn main() -> ExitCode {
@@ -504,6 +526,8 @@ fn main() -> ExitCode {
         eprintln!("ff-gui: HOME is not set; use --db");
         return ExitCode::from(2);
     };
+    // Mends a shortcut saved wrongly by an earlier version, out of the way.
+    std::thread::spawn(settings::repair_shortcut);
     match App::new(db, follow_default, query.join(" ")).and_then(|mut app| app.run()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -669,6 +693,9 @@ impl App {
             tiles: Vec::new(),
             tile_hover: None,
             complete: None,
+            bookmarks: saved::load(),
+            bookmark_selected: 0,
+            bookmark_items: &[],
             drive_selected: 0,
             auto_drives: true,
             pending_paths: Vec::new(),
@@ -683,6 +710,7 @@ impl App {
     }
 
     fn run(&mut self) -> io::Result<()> {
+        self.rebuild_bookmark_menu();
         let result = self.event_loop();
         self.b.keep_clipboard();
         result
@@ -723,6 +751,8 @@ impl App {
             Ok("options2") => self.act(Action::Options(2), 0),
             Ok("options3") => self.act(Action::Options(3), 0),
             Ok("options4") => self.act(Action::Options(4), 0),
+            Ok("options8") => self.act(Action::Options(8), 0),
+            Ok("bookmark1") => self.act(Action::Bookmark(0), 0),
             Ok("drives") => self.act(Action::Options(6), 0),
             Ok("apply-preview") => {
                 // Ticks the first unmounted NTFS drive and prints the daemon
@@ -804,7 +834,16 @@ impl App {
             Ok("reindex") => self.reindex()?,
             Ok("tree") => self.toggle_tree(),
             Ok("complete") => self.update_completion(),
-            Ok("options") => self.open_bar_menu(3),
+            Ok("bookmarks") => self.open_bar_menu(3),
+            Ok("bookmark-add") => self.act(Action::AddBookmark, 0),
+            Ok("export") => self.act(Action::ExportCsv, 0),
+            Ok("export-now") => {
+                self.dialog_input = std::env::var("FF_GUI_EXPORT").unwrap_or_default();
+                self.act(Action::ConfirmExport, 0);
+                eprintln!("{}", self.status);
+                return Ok(());
+            }
+            Ok("options") => self.open_bar_menu(4),
             Ok("props") => self.act(Action::Properties, 0),
             Ok("select") => self.anchor = self.step(self.cursor, false, true),
             _ => {}
@@ -1191,6 +1230,14 @@ impl App {
                 return self.search();
             }
             Action::TreeSize => return self.toggle_tree(),
+            Action::AddBookmark => return self.ask_bookmark(),
+            Action::SaveBookmark => return self.save_bookmark(),
+            Action::Bookmark(i) => return self.open_bookmark(i as usize),
+            Action::SelectBookmark(i) => return self.bookmark_selected = i as usize,
+            Action::RaiseBookmark => return self.raise_bookmark(),
+            Action::RemoveBookmark => return self.remove_bookmark(),
+            Action::ExportCsv => return self.ask_export(),
+            Action::ConfirmExport => return self.export(),
             Action::Reindex => {
                 if let Err(e) = self.reindex() {
                     self.status = e.to_string();
@@ -1518,7 +1565,7 @@ impl App {
     /// the chosen page on the right. Changes apply as they are made,
     /// except drive settings, which have their own Apply button.
     fn open_options(&mut self, page: u8) -> io::Result<()> {
-        let page = page.min(7);
+        let page = page.min(8);
         self.refresh_option_states();
         self.load_index_settings();
         let nav = vec![
@@ -1528,12 +1575,13 @@ impl App {
             NavItem { label: "Results", child: true, action: Action::Options(2) },
             NavItem { label: "View", child: true, action: Action::Options(3) },
             NavItem { label: "Desktop", child: true, action: Action::Options(4) },
+            NavItem { label: "Bookmarks", child: true, action: Action::Options(8) },
             NavItem { label: "Indexes", child: false, action: Action::Options(5) },
             NavItem { label: "Live updates", child: true, action: Action::Options(5) },
             NavItem { label: "Drives", child: true, action: Action::Options(6) },
             NavItem { label: "Exclude", child: true, action: Action::Options(7) },
         ];
-        let selected = [1, 2, 3, 4, 5, 7, 8, 9][page as usize];
+        let selected = [1, 2, 3, 4, 5, 8, 9, 10, 6][page as usize];
         let (heading, rows) = match page {
             0 => (
                 "Interface",
@@ -1630,6 +1678,7 @@ impl App {
                     Row::Button("Rebuild the index now", Action::Reindex),
                 ],
             ),
+            8 => ("Bookmarks", self.bookmark_rows()),
             7 => {
                 let mut rows = vec![
                     Row::Check("Exclude hidden files and folders (names starting with a dot)", Action::ToggleExcludeHidden),
@@ -1763,6 +1812,8 @@ impl App {
                     pair("Ctrl+R, Ctrl+B", "regular expressions, whole words"),
                     pair("F2, F3", "files or folders, letter case"),
                     pair("Alt+Down", "complete a filter and its values"),
+                    pair("Ctrl+D, Alt+1 to Alt+9", "bookmark this search, open a bookmark"),
+                    pair("Ctrl+S", "export the results as a CSV file"),
                     pair("F5", "rebuild the index"),
                     pair("F6", "folder sizes: what takes the space"),
                     pair("Ctrl +, Ctrl -, Ctrl 0", "zoom in, out, reset"),
@@ -1894,6 +1945,7 @@ impl App {
             Action::Theme(theme) => theme == self.theme,
             Action::Language(language) => language == self.language,
             Action::SelectExclude(i) => i as usize == self.exclude_selected,
+            Action::SelectBookmark(i) => i as usize == self.bookmark_selected,
             Action::ToggleExcludeHidden => self.exclude_hidden,
             Action::SelectDrive(i) => i as usize == self.drive_selected,
             Action::ToggleAutoDrives => self.auto_drives,
@@ -2069,7 +2121,7 @@ impl App {
     }
 
     /// (x, width) of each menu-bar title.
-    fn bar_titles(&mut self) -> [(i32, i32); 5] {
+    fn bar_titles(&mut self) -> [(i32, i32); 6] {
         let mut x = 4 * self.u;
         BAR.map(|(title, _)| {
             let w = self.text.width(tr(title)) + 18 * self.u;
@@ -2088,7 +2140,8 @@ impl App {
             self.refresh_option_states();
         }
         let (x, _) = self.bar_titles()[i];
-        self.menu = Some(Menu { x, y: self.menu_h(), hover: None, items: BAR[i].1, bar: Some(i) });
+        let items = if BAR[i].0 == "Bookmarks" { self.bookmark_menu() } else { BAR[i].1 };
+        self.menu = Some(Menu { x, y: self.menu_h(), hover: None, items, bar: Some(i) });
     }
 
     fn rows_visible(&self) -> usize {
@@ -2235,6 +2288,8 @@ impl App {
             Key::Char(ch) if ctrl => match ch.to_ascii_lowercase() {
                 'q' => return Ok(false),
                 'p' => self.act(Action::Options(0), time),
+                'd' => self.act(Action::AddBookmark, time),
+                's' => self.act(Action::ExportCsv, time),
                 'r' => self.act(Action::ToggleRegex, time),
                 'b' => self.act(Action::ToggleWord, time),
                 '+' | '=' => self.act(Action::ZoomIn, time),
@@ -2250,6 +2305,7 @@ impl App {
                 'w' => self.delete_to(self.step(self.cursor, false, true)),
                 _ => {}
             },
+            Key::Char(ch @ '1'..='9') if alt => self.act(Action::Bookmark(ch as u8 - b'1'), time),
             Key::Char(ch) if !alt && !ch.is_control() => self.insert(ch.encode_utf8(&mut [0; 4])),
             Key::Sym(K_BACKSPACE) => self.delete_to(self.step(self.cursor, false, ctrl)),
             // With nothing after the caret to delete, Delete means the

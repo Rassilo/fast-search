@@ -180,9 +180,11 @@ applications menu.
 | Move to trash / delete permanently (both ask first) | Del / Shift+Del |
 | Options (all settings: theme, search, results, view, drives, excludes) | Ctrl+P, or Options → Options... |
 | Actions menu (also: copy name) | right-click or the Menu key |
-| Menu bar | File, Edit, View, Options, Help |
+| Menu bar | File, Edit, View, Bookmarks, Options, Help |
 | Zoom | Ctrl++, Ctrl+-, Ctrl+0 |
 | Edit the search text | arrows, Home, End, Shift to select, Ctrl+A, Ctrl+X, Ctrl+V |
+| Bookmark the current search / open bookmark 1 to 9 | Ctrl+D / Alt+1 to Alt+9, or the Bookmarks menu |
+| Export the results as a CSV file | Ctrl+S, or File → Export results as CSV... |
 | Complete a filter (`ext:`, `size:`, `modified:`) and its usual values | <kbd>Alt</kbd>+<kbd>Down</kbd> or <kbd>Ctrl</kbd>+<kbd>Space</kbd>; then arrows and Enter |
 | All / files / folders | F2 |
 | Case mode | F3 |
@@ -200,6 +202,23 @@ one of them, its usual values. The list narrows as you type; Enter or
 Tab takes the highlighted entry and Esc closes the list.
 
 ![The completion list after modified:](docs/completion.png)
+
+### Bookmarks
+
+Ctrl+D saves the current search under a name, together with how it was
+read (regular expressions, whole words, files or folders only). The
+**Bookmarks** menu lists them and Alt+1 to Alt+9 open the first nine.
+Saving under an existing name replaces that bookmark. Reorder and remove
+them under **Options → Bookmarks**. They are kept in
+`~/.config/ff/bookmarks.tsv`, one per line.
+
+### Exporting results
+
+Ctrl+S writes the results to a CSV file that any spreadsheet opens: name,
+folder, type, size in bytes and date modified. It asks where to save,
+proposing a dated file in your Downloads folder. With several results
+selected, only those are written; in the folder sizes view, the rows of
+the tree are, with each folder's total and file count.
 
 ### Global shortcut
 

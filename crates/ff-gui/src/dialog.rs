@@ -134,6 +134,22 @@ impl App {
         self.open_dialog_with(title, rows, buttons, focus_button, danger, Vec::new(), 0, "")
     }
 
+    /// Opens a plain dialog whose text field starts with `text` in it and
+    /// has the focus. The last button is what the dialog is for.
+    pub fn open_input_dialog(&mut self, title: &str, rows: Vec<Row>, buttons: Vec<Button>, text: String) {
+        let last = buttons.len().saturating_sub(1);
+        if let Err(e) = self.open_dialog(title, rows, buttons, last, false) {
+            self.status = e.to_string();
+            return;
+        }
+        self.dialog_input = text;
+        if let Some(d) = self.dialog.take() {
+            let field = self.dialog_layout(&d).items.iter().position(|item| matches!(item.4, Item::Input(_)));
+            self.dialog = Some(Dialog { focus: field.unwrap_or(d.focus), ..d });
+        }
+        let _ = self.render_dialog();
+    }
+
     /// Opens a dialog with a page list down its left side, or, if such a
     /// dialog is already open, shows another page in it.
     pub fn open_paged_dialog(
@@ -517,10 +533,14 @@ impl App {
             }
             return;
         }
-        // Any other dialog: a button closes it, then does its action.
+        // Any other dialog: a button closes it, then does its action,
+        // which may still want what was typed in the dialog's text field.
+        let typed = std::mem::take(&mut self.dialog_input);
         self.close_dialog();
         if let Some(action) = action {
+            self.dialog_input = typed;
             self.act(action, time);
+            self.dialog_input.clear();
         }
     }
 

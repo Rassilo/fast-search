@@ -56,7 +56,7 @@ pub fn trf(template: &str, values: &[&dyn std::fmt::Display]) -> String {
 }
 
 /// English text and its [French, Spanish, Italian] translations.
-const TEXTS: [(&str, [&str; 3]); 282] = [
+const TEXTS: [(&str, [&str; 3]); 305] = [
     ("File", ["Fichier", "Archivo", "File"]),
     ("Edit", ["Édition", "Editar", "Modifica"]),
     ("View", ["Affichage", "Ver", "Visualizza"]),
@@ -339,6 +339,29 @@ const TEXTS: [(&str, [&str; 3]); 282] = [
     ("Nothing to complete here: try it on an empty word, or after ext:  size:  modified:", ["Rien à compléter ici : essayez sur un mot vide, ou après ext:  size:  modified:", "Nada que completar aquí: pruebe en una palabra vacía, o después de ext:  size:  modified:", "Niente da completare qui: prova su una parola vuota, o dopo ext:  size:  modified:"]),
     ("complete a filter and its values", ["compléter un filtre et ses valeurs", "completar un filtro y sus valores", "completa un filtro e i suoi valori"]),
     ("Enter takes the highlighted entry, Esc closes the list", ["Entrée prend l'entrée en surbrillance, Échap ferme la liste", "Intro toma la entrada resaltada, Esc cierra la lista", "Invio prende la voce evidenziata, Esc chiude l'elenco"]),
+    ("Bookmarks", ["Favoris", "Marcadores", "Segnalibri"]),
+    ("Bookmark this search...", ["Ajouter cette recherche aux favoris...", "Guardar esta búsqueda en marcadores...", "Aggiungi questa ricerca ai segnalibri..."]),
+    ("Bookmark this search", ["Ajouter cette recherche aux favoris", "Guardar esta búsqueda", "Aggiungi ai segnalibri"]),
+    ("Organize bookmarks...", ["Organiser les favoris...", "Organizar marcadores...", "Organizza segnalibri..."]),
+    ("Export results as CSV...", ["Exporter les résultats en CSV...", "Exportar resultados como CSV...", "Esporta i risultati in CSV..."]),
+    ("Export results", ["Exporter les résultats", "Exportar resultados", "Esporta i risultati"]),
+    ("Export", ["Exporter", "Exportar", "Esporta"]),
+    ("Save", ["Enregistrer", "Guardar", "Salva"]),
+    ("Type a search first, then bookmark it", ["Tapez d'abord une recherche, puis ajoutez-la aux favoris", "Escriba primero una búsqueda y luego guárdela", "Digita prima una ricerca, poi aggiungila ai segnalibri"]),
+    ("Name of the bookmark:", ["Nom du favori :", "Nombre del marcador:", "Nome del segnalibro:"]),
+    ("Bookmarked as \"{}\"", ["Ajouté aux favoris sous « {} »", "Guardado como «{}»", "Aggiunto ai segnalibri come «{}»"]),
+    ("There is no bookmark {}", ["Il n'y a pas de favori {}", "No hay marcador {}", "Non c'è il segnalibro {}"]),
+    ("Saved searches:", ["Recherches enregistrées :", "Búsquedas guardadas:", "Ricerche salvate:"]),
+    ("Move the selected bookmark up", ["Monter le favori sélectionné", "Subir el marcador seleccionado", "Sposta su il segnalibro selezionato"]),
+    ("Remove the selected bookmark", ["Supprimer le favori sélectionné", "Quitar el marcador seleccionado", "Rimuovi il segnalibro selezionato"]),
+    ("Ctrl+D bookmarks the current search. The Bookmarks menu opens them;", ["Ctrl+D ajoute la recherche en cours aux favoris. Le menu Favoris les ouvre ;", "Ctrl+D guarda la búsqueda actual. El menú Marcadores las abre;", "Ctrl+D aggiunge la ricerca corrente ai segnalibri. Il menu Segnalibri li apre;"]),
+    ("Alt+1 to Alt+9 open the first nine.", ["Alt+1 à Alt+9 ouvrent les neuf premiers.", "Alt+1 a Alt+9 abren los nueve primeros.", "Alt+1 fino ad Alt+9 aprono i primi nove."]),
+    ("There are no results to export", ["Il n'y a aucun résultat à exporter", "No hay resultados que exportar", "Non ci sono risultati da esportare"]),
+    ("Save {} rows as a CSV file (for a spreadsheet):", ["Enregistrer {} lignes dans un fichier CSV (pour un tableur) :", "Guardar {} filas como archivo CSV (para una hoja de cálculo):", "Salva {} righe in un file CSV (per un foglio di calcolo):"]),
+    ("The file to export to must be a full path, like /home/me/results.csv", ["Le fichier d'export doit être un chemin complet, comme /home/moi/resultats.csv", "El archivo de exportación debe ser una ruta completa, como /home/yo/resultados.csv", "Il file di esportazione deve essere un percorso completo, come /home/io/risultati.csv"]),
+    ("Saved {} rows to {}", ["{} lignes enregistrées dans {}", "{} filas guardadas en {}", "{} righe salvate in {}"]),
+    ("bookmark this search, open a bookmark", ["ajouter aux favoris, ouvrir un favori", "guardar la búsqueda, abrir un marcador", "aggiungi ai segnalibri, apri un segnalibro"]),
+    ("export the results as a CSV file", ["exporter les résultats en CSV", "exportar los resultados como CSV", "esporta i risultati in CSV"]),
 ];
 
 #[cfg(test)]
