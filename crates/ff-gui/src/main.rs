@@ -2,6 +2,7 @@
 
 mod backend;
 mod canvas;
+mod complete;
 mod debug;
 mod dialog;
 mod i18n;
@@ -53,6 +54,8 @@ KEYS:
                      (paste it in a file manager; as text it is the path)
   Ctrl+Shift+C       copy the full path
   Ctrl+V             paste into the search box
+  Alt+Down           complete a filter: ext:  size:  modified:  and their
+                     usual values (also Ctrl+Space)
   drag a result      drop it on a file manager to move it there
                      (hold Ctrl to copy); also editors, upload boxes...
   Menu / right-click actions menu
@@ -413,6 +416,8 @@ struct App {
     /// The tiles of its map as last drawn, and the one under the pointer.
     tiles: Vec<tree::Tile>,
     tile_hover: Option<u32>,
+    /// The list of completions open under the search box.
+    complete: Option<complete::Complete>,
 }
 
 fn main() -> ExitCode {
@@ -658,6 +663,7 @@ impl App {
             tree: None,
             tiles: Vec::new(),
             tile_hover: None,
+            complete: None,
             drive_selected: 0,
             auto_drives: true,
             pending_paths: Vec::new(),
@@ -792,6 +798,7 @@ impl App {
             }
             Ok("reindex") => self.reindex()?,
             Ok("tree") => self.toggle_tree(),
+            Ok("complete") => self.update_completion(),
             Ok("options") => self.open_bar_menu(3),
             Ok("props") => self.act(Action::Properties, 0),
             Ok("select") => self.anchor = self.step(self.cursor, false, true),
@@ -1750,6 +1757,7 @@ impl App {
                     pair("Ctrl+V, Ctrl+X, Ctrl+A", "paste, cut, select all in the search box"),
                     pair("Ctrl+R, Ctrl+B", "regular expressions, whole words"),
                     pair("F2, F3", "files or folders, letter case"),
+                    pair("Alt+Down", "complete a filter and its values"),
                     pair("F5", "rebuild the index"),
                     pair("F6", "folder sizes: what takes the space"),
                     pair("Ctrl +, Ctrl -, Ctrl 0", "zoom in, out, reset"),
@@ -2156,6 +2164,34 @@ impl App {
 
     /// Handles a key press; returns false to quit.
     fn key(&mut self, key: Key, mods: Mods) -> io::Result<bool> {
+        let plain = self.menu.is_none() && self.tree.is_none() && self.props.is_none() && !self.about;
+        if plain && self.completion_key(key, mods) {
+            return Ok(true);
+        }
+        // Alt+Down (or Ctrl+Space) lists what can complete the word.
+        let asked = matches!(key, Key::Sym(K_DOWN) if mods.alt) || matches!(key, Key::Char(' ') if mods.ctrl);
+        if plain && asked {
+            self.update_completion();
+            if self.complete.is_none() {
+                self.status = tr("Nothing to complete here: try it on an empty word, or after ext:  size:  modified:").into();
+            }
+            return Ok(true);
+        }
+        let was_open = self.complete.is_some();
+        let (text, caret) = (self.query.clone(), self.cursor);
+        let go_on = self.key_inner(key, mods)?;
+        // An open list follows the typing; any other key closes it.
+        if was_open {
+            if (text.as_str(), caret) != (self.query.as_str(), self.cursor) && self.tree.is_none() {
+                self.update_completion();
+            } else {
+                self.complete = None;
+            }
+        }
+        Ok(go_on)
+    }
+
+    fn key_inner(&mut self, key: Key, mods: Mods) -> io::Result<bool> {
         let time = 0;
         if self.close_panel() {
             return Ok(true); // any key closes a panel
@@ -2289,6 +2325,9 @@ impl App {
 
     fn press(&mut self, button: u8, x: i32, y: i32, time: u32, mods: Mods) {
         if self.close_panel() {
+            return;
+        }
+        if self.completion_press(button, x, y) {
             return;
         }
         if let Some(menu) = self.menu.take() {
@@ -2425,6 +2464,9 @@ impl App {
             };
             self.drag_paths = arm.paths;
             self.dragging = Some(label);
+            return Ok(true);
+        }
+        if self.completion_motion(x, y) {
             return Ok(true);
         }
         if self.tree.is_some() {
@@ -2708,6 +2750,7 @@ impl App {
             }
         }
 
+        self.draw_completion();
         if let Some(menu) = self.menu.take() {
             self.draw_menu(&menu);
             self.menu = Some(menu);

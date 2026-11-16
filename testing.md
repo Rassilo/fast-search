@@ -77,7 +77,7 @@ tests/gui-smoke.sh x11            # on your own X server
 ```
 
 The script opens the window once per view: results, the two menus,
-About, Properties, four Options pages, Drives, Help and folder sizes.
+About, Properties, four Options pages, Drives, Help, folder sizes and the completion list.
 For each view the window must:
 
 - connect with the expected backend (X11 or Wayland),

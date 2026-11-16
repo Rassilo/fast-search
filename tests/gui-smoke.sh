@@ -94,7 +94,7 @@ export FF_GUI_BACKEND=$backend
 failed=0
 plain=
 # The first is the plain results view; the others must look different.
-for view in results menu bar about props prefs options1 options4 drives help0 regex tree; do
+for view in results menu bar about props prefs options1 options4 drives help0 regex tree complete; do
     picture="$work/$view.ppm"
     log="$work/$view.log"
     hook=$view

@@ -1,5 +1,9 @@
 # Fast search (`ff`)
 
+[![Release](https://img.shields.io/github/v/release/khunder/fast-search?sort=semver)](https://github.com/khunder/fast-search/releases/latest)
+[![CI](https://github.com/khunder/fast-search/actions/workflows/ci.yml/badge.svg)](https://github.com/khunder/fast-search/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **Everything on Linux.** Instant file search in the spirit of voidtools'
 *Everything*: type part of a name and get every matching file on the disk
 in milliseconds. (An independent project, not affiliated with voidtools.)
@@ -154,6 +158,7 @@ applications menu.
 | Menu bar | File, Edit, View, Options, Help |
 | Zoom | Ctrl++, Ctrl+-, Ctrl+0 |
 | Edit the search text | arrows, Home, End, Shift to select, Ctrl+A, Ctrl+X, Ctrl+V |
+| Complete a filter (`ext:`, `size:`, `modified:`) and its usual values | Alt+Down or Ctrl+Space; then arrows and Enter |
 | All / files / folders | F2 |
 | Case mode | F3 |
 | Help: search syntax, filters and shortcuts with examples | F1 |

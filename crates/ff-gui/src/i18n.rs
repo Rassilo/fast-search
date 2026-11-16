@@ -56,7 +56,7 @@ pub fn trf(template: &str, values: &[&dyn std::fmt::Display]) -> String {
 }
 
 /// English text and its [French, Spanish, Italian] translations.
-const TEXTS: [(&str, [&str; 3]); 255] = [
+const TEXTS: [(&str, [&str; 3]); 281] = [
     ("File", ["Fichier", "Archivo", "File"]),
     ("Edit", ["Édition", "Editar", "Modifica"]),
     ("View", ["Affichage", "Ver", "Visualizza"]),
@@ -312,6 +312,32 @@ const TEXTS: [(&str, [&str; 3]); 255] = [
     ("You do not have permission to delete or move this", ["Vous n'avez pas la permission de supprimer ou déplacer cet élément", "No tiene permiso para eliminar o mover esto", "Non hai il permesso di eliminare o spostare questo elemento"]),
     ("You do not have permission to read this", ["Vous n'avez pas la permission de lire cet élément", "No tiene permiso para leer esto", "Non hai il permesso di leggere questo elemento"]),
     ("Dragging {} - drop it on another window to copy it", ["Glissement de {} - déposez-le sur une autre fenêtre pour le copier", "Arrastrando {} - suéltelo en otra ventana para copiarlo", "Trascinamento di {} - rilascialo su un'altra finestra per copiarlo"]),
+    ("by extension", ["par extension", "por extensión", "per estensione"]),
+    ("by size", ["par taille", "por tamaño", "per dimensione"]),
+    ("by date modified", ["par date de modification", "por fecha de modificación", "per data di modifica"]),
+    ("PDF documents", ["documents PDF", "documentos PDF", "documenti PDF"]),
+    ("pictures", ["images", "imágenes", "immagini"]),
+    ("videos", ["vidéos", "vídeos", "video"]),
+    ("music", ["musique", "música", "musica"]),
+    ("text documents", ["documents texte", "documentos de texto", "documenti di testo"]),
+    ("spreadsheets", ["feuilles de calcul", "hojas de cálculo", "fogli di calcolo"]),
+    ("archives", ["archives", "archivos comprimidos", "archivi"]),
+    ("plain text", ["texte brut", "texto sin formato", "testo semplice"]),
+    ("larger than 1 GB", ["plus de 1 Go", "más de 1 GB", "più di 1 GB"]),
+    ("larger than 100 MB", ["plus de 100 Mo", "más de 100 MB", "più di 100 MB"]),
+    ("larger than 10 MB", ["plus de 10 Mo", "más de 10 MB", "più di 10 MB"]),
+    ("smaller than 1 MB", ["moins de 1 Mo", "menos de 1 MB", "meno di 1 MB"]),
+    ("smaller than 1 KB", ["moins de 1 Ko", "menos de 1 KB", "meno di 1 KB"]),
+    ("since midnight", ["depuis minuit", "desde medianoche", "da mezzanotte"]),
+    ("yesterday", ["hier", "ayer", "ieri"]),
+    ("in the last hour", ["depuis une heure", "en la última hora", "nell'ultima ora"]),
+    ("in the last 24 hours", ["depuis 24 heures", "en las últimas 24 horas", "nelle ultime 24 ore"]),
+    ("in the last 30 days", ["depuis 30 jours", "en los últimos 30 días", "negli ultimi 30 giorni"]),
+    ("in the last 365 days", ["depuis 365 jours", "en los últimos 365 días", "negli ultimi 365 giorni"]),
+    ("since a date", ["depuis une date", "desde una fecha", "da una data"]),
+    ("before a date", ["avant une date", "antes de una fecha", "prima di una data"]),
+    ("Nothing to complete here: try it on an empty word, or after ext:  size:  modified:", ["Rien à compléter ici : essayez sur un mot vide, ou après ext:  size:  modified:", "Nada que completar aquí: pruebe en una palabra vacía, o después de ext:  size:  modified:", "Niente da completare qui: prova su una parola vuota, o dopo ext:  size:  modified:"]),
+    ("complete a filter and its values", ["compléter un filtre et ses valeurs", "completar un filtro y sus valores", "completa un filtro e i suoi valori"]),
 ];
 
 #[cfg(test)]
