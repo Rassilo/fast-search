@@ -4,18 +4,17 @@
 [![CI](https://github.com/khunder/fast-search/actions/workflows/ci.yml/badge.svg)](https://github.com/khunder/fast-search/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Everything on Linux.** Instant file search in the spirit of voidtools'
-*Everything*: type part of a name and get every matching file on the disk
-in milliseconds. (An independent project, not affiliated with voidtools.)
+**Instant file search for Linux.** Type part of a name and get every
+matching file on the disk in milliseconds.
 
 ![Fast search window](docs/screenshot.png)
 
 Website: <https://khunder.github.io/fast-search/>
 
-- **Fast.** The whole file tree lives in a compact in-memory index. On the
-  development machine, indexing 270,000 entries takes about 0.4 s and a
-  search about 20 ms, including loading the index.
-- **Small.** Three static binaries of 580–760 KB each. No runtime, no
+- **Fast.** The whole file tree lives in a compact in-memory index.
+  Indexing 270,000 entries takes about 0.4 s and a search about 20 ms,
+  including loading the index.
+- **Small.** Three static binaries of 280–800 KB each. No runtime, no
   interpreter, no shared libraries.
 - **Three ways to use it.** A command (`ff`), a window (`ff-gui`), and a
   library with a C API.
@@ -126,7 +125,33 @@ Filters narrow the results and mix freely with terms.
 | `modified:2026-01-01..2026-06-30` | between two dates; `2026-01-01..` since, `..2026-06-30` before |
 
 `dm:` is short for `modified:`. Dates and times are in your local time
-zone. Example: `ff invoice ext:pdf 'size:>1M' dm:30d`.
+zone.
+
+### Examples
+
+The same text works in the window's search box and after `ff` in a
+terminal. In a terminal, put quotes around anything with `>`, `<`, `*`
+or `!`, as shown.
+
+| To find | Type |
+|---|---|
+| Big files changed in the last month | `'size:>50M' modified:30d` |
+| What filled the disk today | `'size:>100M' modified:today` |
+| The ten largest files anywhere | `ff -l -s size -r -n 10 'size:>1G'` |
+| Invoices as PDF from this year | `invoice ext:pdf modified:2026-01-01..` |
+| Photos from one holiday | `ext:jpg;png modified:2026-07-01..2026-07-15` |
+| Videos over 1 GB | `ext:mp4;mkv 'size:>1G'` |
+| Empty files | `size:0` |
+| Logs touched in the last hour | `ext:log dm:1h` |
+| Old, large archives to clean up | `ext:zip;tar.gz 'size:>500M' modified:..2025-01-01` |
+| Notes that are not drafts | `notes '!draft' ext:md;txt` |
+| All spreadsheets under one project folder | `work/reports ext:xlsx` |
+| Camera files by number | `-R '^IMG_\d+\.jpe?g$'` |
+| A config file, exact case | `-c Makefile` |
+
+Filtering by size and by date at once, in the window:
+
+![Results for size:>50M modified:30d](docs/filters.png)
 
 By default `/proc`, `/sys`, `/dev`, `/run` and `/.snapshots` are skipped,
 and so is the content of trash folders. Leave out more with
@@ -158,7 +183,7 @@ applications menu.
 | Menu bar | File, Edit, View, Options, Help |
 | Zoom | Ctrl++, Ctrl+-, Ctrl+0 |
 | Edit the search text | arrows, Home, End, Shift to select, Ctrl+A, Ctrl+X, Ctrl+V |
-| Complete a filter (`ext:`, `size:`, `modified:`) and its usual values | Alt+Down or Ctrl+Space; then arrows and Enter |
+| Complete a filter (`ext:`, `size:`, `modified:`) and its usual values | <kbd>Alt</kbd>+<kbd>Down</kbd> or <kbd>Ctrl</kbd>+<kbd>Space</kbd>; then arrows and Enter |
 | All / files / folders | F2 |
 | Case mode | F3 |
 | Help: search syntax, filters and shortcuts with examples | F1 |
@@ -167,6 +192,14 @@ applications menu.
 | Folder sizes: what takes the space | F6, or View → Folder sizes |
 | Sort | click a column header; again to reverse |
 | Clear, then quit | Esc |
+
+### Completing filters
+
+<kbd>Alt</kbd>+<kbd>Down</kbd> (or <kbd>Ctrl</kbd>+<kbd>Space</kbd>) in the search box lists the filters and, after
+one of them, its usual values. The list narrows as you type; Enter or
+Tab takes the highlighted entry and Esc closes the list.
+
+![The completion list after modified:](docs/completion.png)
 
 ### Global shortcut
 
@@ -183,6 +216,8 @@ a tree of folders with their total size, number of files and share of
 the folder above, largest first. On the right is a map of the selected
 folder in which each tile's area is its size. It is computed from the
 index, so it appears at once and reads nothing from the disk.
+
+![Folder sizes: a tree and a map of /usr](docs/folder-sizes.png)
 
 | Action | Key or mouse |
 |---|---|
@@ -272,43 +307,6 @@ they cannot open.** Only names, sizes and dates are exposed, never
 contents. Use a group that contains only the people who should have that
 view; without `--group`, only root can read the index.
 
-### Status
-
-The daemon is new and supports x86-64 only, because it calls the kernel
-directly. It has been run on btrfs with subvolumes (the openSUSE layout):
-btrfs refuses a filesystem-wide watch on a subvolume, so `ffd` mounts the
-device's top level privately, in its own mount table, and watches that.
-Its log is at `/run/ff/ffd.log`, readable without root.
-
-## Library and C API
-
-`ff-core` is a normal Rust library:
-
-```rust
-use ff_core::{BuildOptions, Index, Query, SearchOptions};
-
-let index = Index::build(&BuildOptions::new(["/home"]))?;
-index.save("/tmp/ff.db")?;
-for id in index.search(&Query::parse("report *.pdf"), &SearchOptions::default()) {
-    println!("{}", index.path(id).display());
-}
-```
-
-For C and other languages, link `libff_core.a` and include
-[`crates/ff-core/include/ff.h`](crates/ff-core/include/ff.h):
-
-```c
-FfIndex *ix = ff_index_load("/run/ff/index.db");
-FfResults *r = ff_search(ix, "report *.pdf", FF_KIND_FILE, FF_SORT_NAME, 0, 100);
-for (size_t i = 0; i < ff_results_len(r); i++) {
-    char path[4096];
-    ff_results_path(r, i, path, sizeof path);
-    puts(path);
-}
-ff_results_free(r);
-ff_index_free(ix);
-```
-
 ## Packaging and releases
 
 ```sh
@@ -364,33 +362,12 @@ The reasoning behind these three kinds of tests, what each one misses
 and the checklist before a release are in
 [docs/testing.md](testing.md).
 
-## How it works
-
-- **Index.** One byte arena holds all names back to back; flat arrays hold
-  each entry's parent, size, modification time and type. A full path is
-  rebuilt by walking parent links. About 45 bytes per file in memory.
-- **Scan.** Worker threads share a stack of directories to read; each
-  directory is listed and added to the index in one short critical section.
-- **Search.** A parallel linear scan over the names. Name terms are checked
-  first; the full path is only built for entries that pass them.
-- **Window.** `ff-gui` draws every pixel itself (anti-aliased text, icons)
-  and has two ways to show them, both spoken directly over the local
-  socket with no toolkit and no libwayland or Xlib: the **Wayland**
-  protocol (GNOME, KDE, Hyprland, Sway, ...) and the **X11** protocol. It
-  picks one at start-up: Wayland when `WAYLAND_DISPLAY` is set, X11
-  otherwise, and the other one if the first cannot be reached.
-  `FF_GUI_BACKEND=x11` or `FF_GUI_BACKEND=wayland` forces the choice.
-
 ## Limitations
 
 - Linux only. The window runs natively on Wayland and on X11.
 - On Wayland, typing accents with dead keys or Compose is not supported
   yet, and a compositor without title bars of its own (GNOME) always gets
   the built-in title bar.
-- No complex text shaping: Arabic and similar scripts are drawn as
-  unconnected letters, left to right.
-- File icons are built in and chosen by extension, not taken from the
-  desktop theme.
 - Without the daemon, changes are only picked up by `ff index` or F5.
 - Files on a drive read directly (not mounted) can be found, not opened.
 - Regular expressions use a compact engine: `\d`, `\w` and `\s` are

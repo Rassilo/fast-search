@@ -26,7 +26,14 @@ fn home_dir(var: &str, fallback: &str) -> io::Result<PathBuf> {
 fn launch_path() -> io::Result<PathBuf> {
     match std::env::var_os("APPIMAGE").filter(|v| !v.is_empty()) {
         Some(appimage) => Ok(appimage.into()),
-        None => std::env::current_exe(),
+        None => {
+            // A program replaced while it runs (rebuilt, upgraded) is
+            // reported as "path (deleted)": the path is still the one to start.
+            use std::os::unix::ffi::{OsStrExt, OsStringExt};
+            let exe = std::env::current_exe()?.into_os_string().into_vec();
+            let exe = exe.strip_suffix(b" (deleted)").unwrap_or(&exe);
+            Ok(std::ffi::OsStr::from_bytes(exe).into())
+        }
     }
 }
 

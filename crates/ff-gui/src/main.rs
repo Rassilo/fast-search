@@ -547,6 +547,11 @@ fn may_delete(path: &std::path::Path) -> bool {
     if access(folder, 2 | 1) == Some(false) {
         return false;
     }
+    // A folder is moved by rewriting its own link to the folder above,
+    // and emptied before it is deleted: both need write access to it.
+    if path.symlink_metadata().is_ok_and(|m| m.is_dir()) && access(path, 2 | 1) == Some(false) {
+        return false;
+    }
     let (Ok(inside), Ok(holder)) = (path.symlink_metadata(), folder.metadata()) else { return true };
     let me = std::fs::metadata("/proc/self").map_or(holder.uid(), |m| m.uid());
     holder.mode() & 0o1000 == 0 || me == 0 || me == inside.uid() || me == holder.uid()
@@ -2719,8 +2724,10 @@ impl App {
                 modes = format!("{modes}      {}", tr("Ctrl+B whole words: on"));
             }
             match &self.query_error {
-                // A filter or expression that makes no sense: say so.
-                Some(problem) => format!("{n} {objects}      {problem}"),
+                // A filter or expression that makes no sense: say so, but
+                // not while the completion list is open on an unfinished one.
+                Some(problem) if self.complete.is_none() => format!("{n} {objects}      {problem}"),
+                Some(_) => format!("{n} {objects}      {}", tr("Enter takes the highlighted entry, Esc closes the list")),
                 None if self.flag(Flag::SelectedInStatus) && self.sel < self.hits.len() => {
                     let id = self.hits[self.sel];
                     let (yr, mo, d, hh, mm) = ff_core::local_civil(self.index.mtime(id));
@@ -2902,6 +2909,8 @@ mod tests {
         assert!(!may_read(&secret) && may_delete(&secret));
         // Readable, but its folder cannot be changed.
         assert!(may_read(&kept) && !may_delete(&kept));
+        // A folder we may not write into cannot be moved or emptied.
+        assert!(!may_delete(&dir.join("locked")));
         // System files, and a file that is gone (left to the action itself).
         assert!(!may_delete(std::path::Path::new("/etc/hostname")) || !std::path::Path::new("/etc/hostname").exists());
         assert!(!may_delete(std::path::Path::new("/")));

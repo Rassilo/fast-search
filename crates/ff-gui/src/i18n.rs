@@ -56,7 +56,7 @@ pub fn trf(template: &str, values: &[&dyn std::fmt::Display]) -> String {
 }
 
 /// English text and its [French, Spanish, Italian] translations.
-const TEXTS: [(&str, [&str; 3]); 281] = [
+const TEXTS: [(&str, [&str; 3]); 282] = [
     ("File", ["Fichier", "Archivo", "File"]),
     ("Edit", ["Édition", "Editar", "Modifica"]),
     ("View", ["Affichage", "Ver", "Visualizza"]),
@@ -338,6 +338,7 @@ const TEXTS: [(&str, [&str; 3]); 281] = [
     ("before a date", ["avant une date", "antes de una fecha", "prima di una data"]),
     ("Nothing to complete here: try it on an empty word, or after ext:  size:  modified:", ["Rien à compléter ici : essayez sur un mot vide, ou après ext:  size:  modified:", "Nada que completar aquí: pruebe en una palabra vacía, o después de ext:  size:  modified:", "Niente da completare qui: prova su una parola vuota, o dopo ext:  size:  modified:"]),
     ("complete a filter and its values", ["compléter un filtre et ses valeurs", "completar un filtro y sus valores", "completa un filtro e i suoi valori"]),
+    ("Enter takes the highlighted entry, Esc closes the list", ["Entrée prend l'entrée en surbrillance, Échap ferme la liste", "Intro toma la entrada resaltada, Esc cierra la lista", "Invio prende la voce evidenziata, Esc chiude l'elenco"]),
 ];
 
 #[cfg(test)]
