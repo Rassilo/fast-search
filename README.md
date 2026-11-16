@@ -14,10 +14,10 @@ Website: <https://khunder.github.io/fast-search/>
 - **Fast.** The whole file tree lives in a compact in-memory index.
   Indexing 270,000 entries takes about 0.4 s and a search about 20 ms,
   including loading the index.
-- **Small.** Three static binaries of 280–800 KB each. No runtime, no
+- **Small.** Three static binaries of 280–820 KB each. No runtime, no
   interpreter, no shared libraries.
-- **Three ways to use it.** A command (`ff`), a window (`ff-gui`), and a
-  library with a C API.
+- **Four ways to use it.** A command (`ff`), a full-screen terminal
+  interface (`ff -i`), a window (`ff-gui`), and a library with a C API.
 - **Optionally live.** A root daemon (`ffd`) follows file changes so the
   index is always current.
 
@@ -90,6 +90,51 @@ ff --open-folder notes.txt       # show it in the file manager
 ff -p notes.txt          # print its properties
 ff stats                 # what is indexed
 ```
+
+### Interactive: `ff -i`
+
+`ff -i` opens a full-screen search in the terminal: type and the results
+follow, as in the window. It works over SSH and on machines with no
+desktop. Enter opens the selected file in your editor (`$VISUAL`,
+`$EDITOR`, else `vi`) and brings you back to the list when you quit it.
+When the output of `ff -i` is captured, Enter prints the chosen path and
+quits instead, so it combines with other commands:
+
+```sh
+vim "$(ff -i)"           # pick a file, edit it
+cd "$(ff -i -d)"         # pick a folder, go there
+ff -I report ext:pdf     # start with a search already typed
+```
+
+| Action | Key |
+|---|---|
+| Move through the results | Up, Down, PgUp, PgDn, Ctrl+P, Ctrl+N, the mouse wheel |
+| Open in your editor (or print and quit, when the output is captured) | Enter, or double-click |
+| Print the selected paths and quit | Alt+P |
+| Mark several; Enter and the keys below then act on all of them | Tab, Shift+Tab |
+| Open with the default application / show in the file manager | Ctrl+O / Ctrl+G |
+| Edit in `$VISUAL` or `$EDITOR` (else `vi`), in the terminal | F4 or Alt+E |
+| Edit a file you cannot change, with `sudoedit` (asks for your password) | Enter and F4 do it by itself; Alt+S forces it |
+| Properties / copy the path | Alt+Enter / Ctrl+Y |
+| Complete a filter | <kbd>Alt</kbd>+<kbd>Down</kbd> or <kbd>Ctrl</kbd>+<kbd>Space</kbd> |
+| Run a bookmark saved in the window | Alt+1 to Alt+9 |
+| All / files / folders, case, regex, whole words | F2, F3, Ctrl+R, Ctrl+B |
+| Sort by name, size, date or path | Ctrl+S |
+| Folder sizes as a tree with bars | F6; Right and Left open and close |
+| Keys | F1 |
+| Clear the search, then quit / quit at once | Esc / Ctrl+C |
+
+A file you may not change, such as `/etc/hosts`, is edited with
+`sudoedit`: your editor works on a copy as you, and the file is written
+back as root only if you saved a change. Quitting with `:q` leaves it
+untouched, and the status line says so. If you refuse the password
+(or it is wrong, or you press Ctrl+C), the file opens read-only instead
+(`vim -R`, `nano -v`).
+
+Ctrl+Y copies through the terminal (OSC 52), which most modern terminals
+allow, also over SSH. `ff -i` alone opens the interface; with search
+terms, `-i` still means case-insensitive, as before. Set `NO_COLOR` for
+no colours.
 
 ### Search terms
 

@@ -8,11 +8,14 @@ use std::time::Instant;
 
 use ff_core::{BuildOptions, CaseMode, Index, Kind, Query, SearchOptions, Sort};
 
+mod tui;
+
 const USAGE: &str = "\
 ff - fast find: instant file search
 
 USAGE:
   ff [OPTIONS] TERM...          search (all terms must match)
+  ff -i                         search interactively in the terminal
   ff index [ROOT...] [-x DIR]   build or rebuild the index
   ff stats                      show index information
 
@@ -32,7 +35,10 @@ SEARCH OPTIONS:
   -f, --files        files only
   -d, --dirs         directories only
   -c, --case         case-sensitive
-  -i, --ignore-case  case-insensitive
+  -i, --ignore-case  case-insensitive (alone, with no TERM: interactive)
+  -I, --interactive  search interactively, starting with the TERMs if any.
+                     Enter prints the chosen path: vim \"$(ff -i)\";
+                     F1 there lists the keys
   -R, --regex        terms are regular expressions, e.g. '^img_[0-9]+[.]jpe?g$'
   -w, --word         terms match whole words only
       --match-path   match every term against the full path
@@ -98,6 +104,9 @@ struct Args {
     devices: Vec<PathBuf>,
     no_hidden: bool,
     threads: usize,
+    interactive: bool,
+    /// -i was given: alone it means the interactive search.
+    short_i: bool,
 }
 
 fn run() -> Result<ExitCode, String> {
@@ -126,7 +135,9 @@ fn run() -> Result<ExitCode, String> {
             "-f" | "--files" => a.kind = Kind::File,
             "-d" | "--dirs" => a.kind = Kind::Dir,
             "-c" | "--case" => a.case = CaseMode::Sensitive,
-            "-i" | "--ignore-case" => a.case = CaseMode::Insensitive,
+            "-i" => (a.case, a.short_i) = (CaseMode::Insensitive, true),
+            "--ignore-case" => a.case = CaseMode::Insensitive,
+            "-I" | "--interactive" => a.interactive = true,
             "-R" | "--regex" => a.regex = true,
             "-w" | "--word" => a.word = true,
             "--match-path" => a.match_path = true,
@@ -159,6 +170,13 @@ fn run() -> Result<ExitCode, String> {
     }
 
     let db = a.db.take().map_or_else(default_db, Ok)?;
+    if a.short_i && a.free.is_empty() && !a.interactive {
+        // `ff -i` alone: there is nothing to ignore the case of.
+        (a.interactive, a.case) = (true, CaseMode::Smart);
+    }
+    if a.interactive {
+        return cmd_interactive(a, &db);
+    }
     // A leading "index"/"stats" is a command unless "--" was used.
     match a.free.first().and_then(|f| f.to_str()).filter(|_| !only_free) {
         Some("index") => cmd_index(&a, &db),
@@ -226,21 +244,46 @@ fn cmd_index(a: &Args, db: &PathBuf) -> Result<ExitCode, String> {
 
 fn cmd_stats(db: &PathBuf) -> Result<ExitCode, String> {
     let index = load(db)?;
+    // A closed pipe (`ff stats | head -3`) just ends the output.
+    let _ = print_stats(db, &index);
+    Ok(ExitCode::SUCCESS)
+}
+
+fn print_stats(db: &PathBuf, index: &Index) -> io::Result<()> {
+    let mut out = io::stdout().lock();
     let dirs = (0..index.len() as u32).filter(|&i| index.is_dir(i)).count();
     let file_len = std::fs::metadata(db).map_or(0, |m| m.len());
-    println!("index:    {} ({:.1} MiB)", db.display(), file_len as f64 / 1048576.0);
-    println!("entries:  {} ({} directories, {} files)", index.len(), dirs, index.len() - dirs);
-    println!("memory:   {:.1} MiB", index.memory_usage() as f64 / 1048576.0);
+    writeln!(out, "index:    {} ({:.1} MiB)", db.display(), file_len as f64 / 1048576.0)?;
+    writeln!(out, "entries:  {} ({} directories, {} files)", index.len(), dirs, index.len() - dirs)?;
+    writeln!(out, "memory:   {:.1} MiB", index.memory_usage() as f64 / 1048576.0)?;
     for r in index.roots() {
-        println!("root:     {}", index.path(r).display());
+        writeln!(out, "root:     {}", index.path(r).display())?;
     }
     for x in index.excludes() {
-        println!("exclude:  {}", x.display());
+        writeln!(out, "exclude:  {}", x.display())?;
     }
     if index.skips_hidden() {
-        println!("exclude:  hidden files and folders (names starting with a dot)");
+        writeln!(out, "exclude:  hidden files and folders (names starting with a dot)")?;
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(())
+}
+
+fn cmd_interactive(a: Args, db: &PathBuf) -> Result<ExitCode, String> {
+    let index = load(db)?;
+    let query = a.free.iter().map(|t| t.to_string_lossy()).collect::<Vec<_>>().join(" ");
+    let start = tui::Start {
+        query,
+        kind: a.kind,
+        case: a.case,
+        regex: a.regex,
+        word: a.word,
+        match_path: a.match_path,
+        wildcards_anywhere: a.wildcards_anywhere,
+        sort: a.sort,
+        reverse: a.reverse,
+        null: a.null,
+    };
+    tui::run(db.clone(), index, start)
 }
 
 fn cmd_search(a: &Args, db: &PathBuf) -> Result<ExitCode, String> {

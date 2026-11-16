@@ -153,10 +153,11 @@
   <div><b>1</b><span>third-party library, for reading fonts</span></div>
 </div>
 
-<h2 id="use">Three ways to use it</h2>
-<p class="lead">All three share one engine and one index, so results are identical everywhere.</p>
+<h2 id="use">Four ways to use it</h2>
+<p class="lead">All four share one engine and one index, so results are identical everywhere.</p>
 <div class="cards">
   <div class="card"><h3>Command <code>ff</code></h3><p>Search from the terminal, pipe results into other tools, open a file, show it in the file manager or print its properties.</p></div>
+  <div class="card"><h3>Terminal interface <code>ff -i</code></h3><p>A full-screen search in the terminal, also over SSH: results as you type, folder sizes, filter completion. Enter prints the chosen path, so <code>vim "$(ff -i)"</code> just works.</p></div>
   <div class="card"><h3>Window <code>ff-gui</code></h3><p>Search as you type, with file icons, sortable columns, drag and drop, a right-click menu and an options window. A folder sizes view shows what takes the space. Light and dark themes; English, French, Spanish and Italian.</p></div>
   <div class="card"><h3>Library <code>ff-core</code></h3><p>A Rust crate and a static C library with a small header, to embed the same search in your own program.</p></div>
 </div>
@@ -231,7 +232,9 @@ ff report '*.pdf'                 <span class="c"># search</span>
 ff -l -s size -r -n 10 '*.iso'    <span class="c"># ten largest ISOs, with size and date</span>
 ff -o notes.txt                   <span class="c"># open the first result</span>
 ff --open-folder notes.txt        <span class="c"># show it in the file manager</span>
-ff -p notes.txt                   <span class="c"># print its properties</span></code></pre>
+ff -p notes.txt                   <span class="c"># print its properties</span>
+ff -i                             <span class="c"># full-screen search; Enter prints the path</span>
+vim "$(ff -i)"                    <span class="c"># pick a file and edit it</span></code></pre>
 
 <h2 id="live">Live updates, without giving the window root</h2>
 <p class="lead">On its own the index is a snapshot. An optional daemon keeps it current, so a window left open for days always shows the disk as it is.</p>

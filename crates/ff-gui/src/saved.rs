@@ -4,50 +4,15 @@
 use std::io::{self, Write};
 use std::path::PathBuf;
 
+use ff_core::bookmarks::{self, Bookmark, format};
 use ff_core::{Kind, group_digits};
 
 use crate::dialog::Row;
 use crate::i18n::{tr, trf};
 use crate::{Action, App, Items};
 
-/// A saved search: what was typed and how it was read.
-#[derive(Clone, PartialEq, Debug)]
-pub struct Bookmark {
-    pub name: String,
-    pub query: String,
-    /// Letters: r regular expressions, w whole words, f files only,
-    /// d folders only.
-    pub flags: String,
-}
-
 /// The entries of the Bookmarks menu that are always there.
 const MENU_HEAD: [(&str, &str, Action); 2] = [("Bookmark this search...", "Ctrl+D", Action::AddBookmark), ("Organize bookmarks...", "", Action::Options(8))];
-
-fn file() -> io::Result<PathBuf> {
-    let config = match std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is not set"))?).join(".config"),
-    };
-    Ok(config.join("ff/bookmarks.tsv"))
-}
-
-/// One bookmark per line: name, search and flags, separated by tabs.
-pub fn parse(text: &str) -> Vec<Bookmark> {
-    let line = |l: &str| {
-        let mut parts = l.split('\t');
-        let (name, query) = (parts.next()?.trim(), parts.next()?);
-        (!name.is_empty() && !query.trim().is_empty()).then(|| Bookmark { name: name.into(), query: query.into(), flags: parts.next().unwrap_or("").trim().into() })
-    };
-    text.lines().filter_map(line).collect()
-}
-
-pub fn format(bookmarks: &[Bookmark]) -> String {
-    bookmarks.iter().map(|b| format!("{}\t{}\t{}\n", b.name, b.query, b.flags)).collect()
-}
-
-pub fn load() -> Vec<Bookmark> {
-    file().and_then(std::fs::read_to_string).map(|text| parse(&text)).unwrap_or_default()
-}
 
 /// A field of a CSV file: quoted when it holds a comma, a quote or a
 /// line break, with quotes doubled.
@@ -77,7 +42,7 @@ impl App {
     }
 
     fn save_bookmarks(&mut self) {
-        let saved = file().and_then(|path| {
+        let saved = bookmarks::file().and_then(|path| {
             std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new(".")))?;
             std::fs::write(path, format(&self.bookmarks))
         });
@@ -275,17 +240,6 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bookmarks_survive_saving() {
-        let bookmarks = vec![
-            Bookmark { name: "Big recent files".into(), query: "size:>50M modified:30d".into(), flags: "f".into() },
-            Bookmark { name: "ext:pdf invoice".into(), query: "ext:pdf invoice".into(), flags: String::new() },
-        ];
-        assert_eq!(parse(&format(&bookmarks)), bookmarks);
-        // Damaged lines are skipped, not fatal.
-        assert_eq!(parse("only a name\n\t\t\nok\tquery\n").len(), 1);
-    }
 
     #[test]
     fn csv_fields_are_quoted_when_needed() {

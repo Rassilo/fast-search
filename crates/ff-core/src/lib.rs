@@ -20,12 +20,15 @@
 #[cfg(not(all(unix, target_pointer_width = "64")))]
 compile_error!("ff-core supports 64-bit Unix targets only");
 
+pub mod bookmarks;
+pub mod complete;
 pub mod desktop;
 pub mod ffi;
 mod index;
 pub mod live;
 mod query;
 pub mod rawfs;
+pub mod sizes;
 pub mod time;
 mod walk;
 

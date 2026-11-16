@@ -29,17 +29,26 @@ The program has three parts that fail in different ways:
 cargo test
 ```
 
-37 tests and one documentation example, no root, a few seconds.
+44 tests and one documentation example, no root, a few seconds.
 
-- **ff-core (22 tests):** the query engine (terms, wildcards, regular
+- **ff-core (26 tests):** the query engine (terms, wildcards, regular
   expressions, filters, Unicode case), time zones, the index file
-  format, the C API, patching a loaded index, deleting files, and the
-  readers that index ext2/ext4 and NTFS drives directly.
+  format, the C API, patching a loaded index, deleting files, the
+  readers that index ext2/ext4 and NTFS drives directly, folder totals
+  and the treemap layout, filter completion and the bookmark file.
+- **ff-cli (3 tests):** the terminal interface's reading of key and
+  mouse sequences, fitting text to terminal cells (wide characters
+  included), and that control characters in file names never reach the
+  terminal.
 - **ff-daemon (8 tests):** decoding kernel events, the mount table and
   drive settings.
-- **ff-gui (7 tests):** folder totals and the tree, the treemap layout,
-  the XKB keymap parser, global shortcut parsing, drive settings, and
-  that every translation keeps its `{}` placeholders.
+- **ff-gui (7 tests):** the XKB keymap parser, global shortcut parsing,
+  drive settings, permission checks, CSV quoting, and that every
+  translation keeps its `{}` placeholders.
+
+The terminal interface itself (`ff -i`) is not in CI yet. It was checked
+in a pseudo-terminal: drawing, picking, marking, completion, folder
+sizes, editing in place, copying and properties.
 
 The drive-reader tests build small disk images with `mkfs.ext4`,
 `mkfs.ntfs` and `ntfscp`. Where those tools are not installed, these

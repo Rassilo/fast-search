@@ -437,7 +437,7 @@ struct App {
     complete: Option<complete::Complete>,
     /// Saved searches, the one selected on their Options page, and the
     /// Bookmarks menu made from them.
-    bookmarks: Vec<saved::Bookmark>,
+    bookmarks: Vec<ff_core::bookmarks::Bookmark>,
     bookmark_selected: usize,
     bookmark_items: Items,
 }
@@ -693,7 +693,7 @@ impl App {
             tiles: Vec::new(),
             tile_hover: None,
             complete: None,
-            bookmarks: saved::load(),
+            bookmarks: ff_core::bookmarks::load(),
             bookmark_selected: 0,
             bookmark_items: &[],
             drive_selected: 0,
