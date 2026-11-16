@@ -122,6 +122,7 @@
   <nav>
     <a href="#use">Use</a>
     <a href="#sizes">Folder sizes</a>
+    <a href="#terminal">Terminal</a>
     <a href="#live">Live updates</a>
     <a href="#download">Download</a>
     <a href="https://github.com/khunder/fast-search">GitHub</a>
@@ -235,6 +236,38 @@ ff --open-folder notes.txt        <span class="c"># show it in the file manager<
 ff -p notes.txt                   <span class="c"># print its properties</span>
 ff -i                             <span class="c"># full-screen search; Enter prints the path</span>
 vim "$(ff -i)"                    <span class="c"># pick a file and edit it</span></code></pre>
+
+<h2 id="terminal">In the terminal: <code>ff -i</code></h2>
+<p class="lead">A full-screen search for the terminal, also over SSH: results as you type, folder sizes, filter completion and your bookmarks. Enter opens the file in your editor and brings you back to the list; system files go through <code>sudoedit</code>, and open read-only if you refuse the password.</p>
+<div class="window">
+  <img src="tui-search.png" width="1928" height="918" loading="lazy" alt="ff -i in a terminal: the search 'size:>50M modified:30d' lists fifteen files with their folder, size and date, largest first, and a status line saying 15 of 142,822, by size, largest first.">
+</div>
+<p class="caption">Files over 50 MB changed in the last 30 days, largest first: <code>ff -I 'size:&gt;50M modified:30d' -s size -r</code>.</p>
+
+<h3>Starting points</h3>
+<pre><code>ff -i                              <span class="c"># browse; Enter opens the file in your editor</span>
+ff -I hosts                        <span class="c"># system files open through sudoedit</span>
+ff -I 'size:&gt;1G' -s size -r        <span class="c"># the biggest files first</span>
+ff -I ext:log dm:1h -s mtime -r    <span class="c"># logs written in the last hour, newest first</span>
+ssh -t server ff -i                <span class="c"># on a server, over SSH</span></code></pre>
+
+<h3>With other commands</h3>
+<p class="lead">When its output is captured, Enter prints the chosen path instead of opening it. <kbd>Tab</kbd> marks several.</p>
+<pre><code>vim "$(ff -i)"                     <span class="c"># edit one file</span>
+cd "$(ff -i -d)"                   <span class="c"># go to a folder</span>
+cp "$(ff -i)" .                    <span class="c"># copy a file here</span>
+ff -i -0 | xargs -0 -o vim         <span class="c"># mark several with Tab, edit them all</span></code></pre>
+
+<div class="cards">
+  <div class="card"><h3>Edit a system file</h3><p>Type <code>hosts</code>, press <kbd>Enter</kbd>, give the root password: vim works on a copy, and <code>:q</code> leaves the file untouched.</p></div>
+  <div class="card"><h3>See what fills the disk</h3><p><kbd>F6</kbd> shows folder sizes as a tree with bars; <kbd>Right</kbd> and <kbd>Left</kbd> open and close folders.</p></div>
+  <div class="card"><h3>Keys</h3><p><kbd>F1</kbd> lists them all. <kbd>Alt</kbd>+<kbd>Down</kbd> completes filters, <kbd>Ctrl</kbd>+<kbd>S</kbd> changes the order, <kbd>Esc</kbd> clears, then quits.</p></div>
+</div>
+
+<div class="window" style="margin-top:28px">
+  <img src="tui-sizes.png" width="1928" height="918" loading="lazy" alt="ff -i showing folder sizes: /usr and its lib64 folder opened, each entry with a bar, its size, number of files and share of the folder above.">
+</div>
+<p class="caption">Folder sizes in the terminal (<kbd>F6</kbd>).</p>
 
 <h2 id="live">Live updates, without giving the window root</h2>
 <p class="lead">On its own the index is a snapshot. An optional daemon keeps it current, so a window left open for days always shows the disk as it is.</p>

@@ -106,6 +106,8 @@ cd "$(ff -i -d)"         # pick a folder, go there
 ff -I report ext:pdf     # start with a search already typed
 ```
 
+![ff -i listing files over 50 MB changed in the last 30 days, largest first](docs/tui-search.png)
+
 | Action | Key |
 |---|---|
 | Move through the results | Up, Down, PgUp, PgDn, Ctrl+P, Ctrl+N, the mouse wheel |
@@ -135,6 +137,64 @@ Ctrl+Y copies through the terminal (OSC 52), which most modern terminals
 allow, also over SSH. `ff -i` alone opens the interface; with search
 terms, `-i` still means case-insensitive, as before. Set `NO_COLOR` for
 no colours.
+
+#### Examples
+
+Starting points, each a single command:
+
+```sh
+ff -i                              # browse; Enter opens the file in your editor
+ff -I hosts                        # system files open through sudoedit
+ff -I 'size:>1G' -s size -r        # the biggest files first
+ff -I ext:log dm:1h -s mtime -r    # logs written in the last hour, newest first
+ff -I Downloads/ modified:today    # what arrived in Downloads today
+ff -I -d                           # folders only
+ssh -t server ff -i                # on a server, over SSH
+```
+
+Combined with other commands. Enter prints the choice when the output is
+captured; Tab marks several:
+
+```sh
+vim "$(ff -i)"                     # edit one file
+cd "$(ff -i -d)"                   # go to a folder
+cp "$(ff -i)" .                    # copy a file here
+ff -i -0 | xargs -0 -o vim         # mark several with Tab, edit them all
+ff -i | wl-copy                    # put the path on the clipboard (Wayland)
+```
+
+Everyday tasks, inside the interface:
+
+| To | Do |
+|---|---|
+| Edit `/etc/hosts` | type `hosts`, select it, Enter: your root password, then vim on a copy; `:q` leaves the file as it was, and refusing the password opens it read-only |
+| See what fills the disk | F6, then Right and Left to open folders; Esc returns to the search |
+| Find large old archives | type `ext:zip;tar.gz size:>500M`, Ctrl+S until it says "by size" |
+| Open several files at once | Tab on each, then Enter: they open together in your editor |
+| Reuse a search from the window | Alt+1 to Alt+9 run the window's bookmarks |
+
+![ff -i showing folder sizes of /usr as a tree with bars](docs/tui-sizes.png)
+
+#### In your shell
+
+Two additions to `~/.bashrc`: `fcd` picks a folder and goes there, and
+Ctrl+F inserts the chosen paths, quoted, where you are typing a command
+(`ls -l ` then Ctrl+F):
+
+```sh
+fcd() { local dir; dir=$(ff -I -d "$@") && cd "$dir"; }
+
+ff_insert() {
+    local picked
+    picked=$(ff -i | while IFS= read -r line; do printf '%q ' "$line"; done)
+    READLINE_LINE="${READLINE_LINE:0:$READLINE_POINT}$picked${READLINE_LINE:$READLINE_POINT}"
+    READLINE_POINT=$((READLINE_POINT + ${#picked}))
+}
+bind -x '"\C-f": ff_insert'
+```
+
+In scripts and functions, use `-I` to pass a search: with search terms,
+`-i` means case-insensitive.
 
 ### Search terms
 

@@ -1222,7 +1222,7 @@ impl Ui {
             return;
         }
         let (show_size, show_date) = (cols >= 50, cols >= 76);
-        let right = if show_date { 29 } else if show_size { 11 } else { 0 };
+        let right = if show_date { 28 } else if show_size { 11 } else { 0 };
         for row in self.top..(self.top + body).min(self.hits.len()) {
             let id = self.hits[row];
             let selected = row == self.sel;
@@ -1245,7 +1245,7 @@ impl Ui {
                 let folder = fit_end(&folder, room - used - 2);
                 line.push_str(&format!("  {}{folder}{base}", self.paint.dim));
             }
-            let used = 2 + width(&line_text(&line));
+            let used = width(&line_text(&line));
             line.push_str(&" ".repeat(cols.saturating_sub(right).saturating_sub(used)));
             if show_size {
                 let size = if is_dir { String::new() } else { human_size(self.index.size(id)) };
@@ -1354,7 +1354,9 @@ impl Ui {
         let w = (text_w + mean_w + 5).min(cols);
         let x = (2 + left).min(cols.saturating_sub(w));
         for (i, (text, means)) in c.items.iter().enumerate().take(self.body_rows()) {
-            let style = if i == c.chosen { "\x1b[0;7m" } else { "\x1b[0;100;97m" };
+            // The chosen entry in the accent colour, so it does not look
+            // like the selected result under the list.
+            let style = if i == c.chosen { "\x1b[0;1;30;43m" } else { "\x1b[0;100;97m" };
             let inner = format!(" {}  {} ", pad(text, text_w), pad(means, mean_w));
             out.push_str(&format!("\x1b[{};{}H{style}{}\x1b[0m", i + 2, x + 1, fit(&inner, w)));
         }
