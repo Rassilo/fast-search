@@ -161,7 +161,102 @@ pub fn remove_launcher() -> io::Result<()> {
 
 const KEYS_SCHEMA: &str = "org.gnome.settings-daemon.plugins.media-keys";
 const KEY_PATH: &str = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/ff/";
-const KEY_BINDING: &str = "<Alt>e";
+/// The keys used until the user chooses others.
+pub const DEFAULT_SHORTCUT: &str = "Alt+E";
+
+/// Keys with a name: how we write them, and their GNOME (X keysym) name.
+const NAMED_KEYS: [(&str, &str); 26] = [
+    ("Space", "space"),
+    ("Enter", "Return"),
+    ("Tab", "Tab"),
+    ("Esc", "Escape"),
+    ("Home", "Home"),
+    ("End", "End"),
+    ("Insert", "Insert"),
+    ("Delete", "Delete"),
+    ("PageUp", "Page_Up"),
+    ("PageDown", "Page_Down"),
+    ("Up", "Up"),
+    ("Down", "Down"),
+    ("Left", "Left"),
+    ("Right", "Right"),
+    ("Print", "Print"),
+    (",", "comma"),
+    (".", "period"),
+    ("/", "slash"),
+    (";", "semicolon"),
+    ("'", "apostrophe"),
+    ("[", "bracketleft"),
+    ("]", "bracketright"),
+    ("-", "minus"),
+    ("=", "equal"),
+    ("`", "grave"),
+    ("\\", "backslash"),
+];
+
+const MODIFIERS: [(&str, &str); 4] = [("Ctrl", "<Control>"), ("Alt", "<Alt>"), ("Shift", "<Shift>"), ("Super", "<Super>")];
+
+/// Turns keys as people write them ("Ctrl+Alt+F", "super + space") into
+/// a GNOME binding ("<Control><Alt>f"). A binding is accepted as it is.
+pub fn shortcut_binding(keys: &str) -> Result<String, String> {
+    let keys = keys.trim();
+    if keys.starts_with('<') && keys.ends_with(|c: char| c != '>') && !keys.contains(['\'', ' ']) {
+        return Ok(keys.to_string());
+    }
+    let mut parts: Vec<&str> = keys.split('+').map(str::trim).collect();
+    let key = parts.pop().filter(|k| !k.is_empty()).ok_or("type the keys of the shortcut, such as Ctrl+Alt+F")?;
+    let mut held = [false; 4];
+    for part in parts {
+        let which = match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => 0,
+            "alt" => 1,
+            "shift" => 2,
+            "super" | "win" | "windows" | "meta" | "cmd" => 3,
+            _ => return Err(format!("\"{part}\" is not Ctrl, Alt, Shift or Super")),
+        };
+        held[which] = true;
+    }
+    let lower = key.to_ascii_lowercase();
+    let function_key = lower.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()).filter(|n| (1..=12).contains(n));
+    let name = if let Some(n) = function_key {
+        format!("F{n}")
+    } else if let Some((_, name)) = NAMED_KEYS.iter().find(|(ours, _)| ours.eq_ignore_ascii_case(key)) {
+        name.to_string()
+    } else if key.len() == 1 && key.as_bytes()[0].is_ascii_alphanumeric() {
+        lower
+    } else {
+        return Err(format!("\"{key}\" is not a key this can use: a letter, a digit, F1 to F12, Space..."));
+    };
+    // A bare letter as a global shortcut would make it impossible to type.
+    if !(held[0] || held[1] || held[3]) && function_key.is_none() {
+        return Err("a shortcut needs Ctrl, Alt or Super, such as Ctrl+Alt+F".into());
+    }
+    let mods: String = MODIFIERS.iter().zip(held).filter(|(_, on)| *on).map(|((_, gnome), _)| *gnome).collect();
+    Ok(mods + &name)
+}
+
+/// A GNOME binding as people write it: "<Control><Alt>f" is "Ctrl+Alt+F".
+pub fn shortcut_label(binding: &str) -> String {
+    let mut rest = binding.trim();
+    let mut out = String::new();
+    while let Some((tag, after)) = rest.strip_prefix('<').and_then(|r| r.split_once('>')) {
+        let tag = format!("<{tag}>");
+        let ours = match tag.as_str() {
+            "<Primary>" | "<Ctrl>" => "Ctrl",
+            "<Mod1>" => "Alt",
+            "<Mod4>" | "<Meta>" => "Super",
+            _ => MODIFIERS.iter().find(|(_, gnome)| *gnome == tag).map_or(tag.trim_matches(['<', '>']), |(ours, _)| ours),
+        };
+        out = out + ours + "+";
+        rest = after;
+    }
+    let key = match NAMED_KEYS.iter().find(|(_, gnome)| *gnome == rest) {
+        Some((ours, _)) => ours.to_string(),
+        None if rest.len() == 1 => rest.to_ascii_uppercase(),
+        None => rest.to_string(),
+    };
+    out + &key
+}
 
 fn gsettings(args: &[&str]) -> io::Result<String> {
     let out = Command::new("gsettings").args(args).stdin(Stdio::null()).output().map_err(|e| match e.kind() {
@@ -184,9 +279,18 @@ pub fn shortcut_enabled() -> bool {
     custom_shortcuts().is_ok_and(|list| list.iter().any(|p| p == KEY_PATH))
 }
 
-/// Adds or removes the Alt+E shortcut that starts this program.
-/// Returns the new state.
-pub fn set_shortcut(on: bool) -> io::Result<bool> {
+/// The keys of the shortcut the desktop has for us now, if any.
+pub fn current_shortcut() -> Option<String> {
+    let ours = format!("{KEYS_SCHEMA}.custom-keybinding:{KEY_PATH}");
+    let binding = gsettings(&["get", &ours, "binding"]).ok()?;
+    let binding = binding.trim().trim_matches('\'');
+    (shortcut_enabled() && !binding.is_empty()).then(|| shortcut_label(binding))
+}
+
+/// Adds the shortcut `keys` (as in "Ctrl+Alt+F") that starts this
+/// program, or removes ours. Returns the new state.
+pub fn set_shortcut(on: bool, keys: &str) -> io::Result<bool> {
+    let binding = if on { shortcut_binding(keys).map_err(other)? } else { String::new() };
     let mut list = custom_shortcuts()?;
     list.retain(|p| p != KEY_PATH);
     let ours = format!("{KEYS_SCHEMA}.custom-keybinding:{KEY_PATH}");
@@ -195,7 +299,7 @@ pub fn set_shortcut(on: bool) -> io::Result<bool> {
         let exe = exe.to_str().ok_or_else(|| other("the program path is not valid UTF-8"))?;
         gsettings(&["set", &ours, "name", "Fast search"])?;
         gsettings(&["set", &ours, "command", exe])?;
-        gsettings(&["set", &ours, "binding", KEY_BINDING])?;
+        gsettings(&["set", &ours, "binding", &binding])?;
         list.push(KEY_PATH.into());
     } else {
         for key in ["name", "command", "binding"] {
@@ -400,6 +504,24 @@ pub fn apply_drives(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcuts_as_written_and_as_gnome_wants_them() {
+        for (written, binding, label) in [
+            ("Alt+E", "<Alt>e", "Alt+E"),
+            ("ctrl + alt + f", "<Control><Alt>f", "Ctrl+Alt+F"),
+            ("Super+Space", "<Super>space", "Super+Space"),
+            ("win+shift+/", "<Shift><Super>slash", "Shift+Super+/"),
+            ("F9", "F9", "F9"),
+            ("<Primary><Alt>k", "<Primary><Alt>k", "Ctrl+Alt+K"),
+        ] {
+            assert_eq!(shortcut_binding(written).as_deref(), Ok(binding), "{written}");
+            assert_eq!(shortcut_label(binding), label);
+        }
+        for bad in ["", "e", "Shift+E", "Ctrl+", "Hyper+E", "Ctrl+Banana"] {
+            assert!(shortcut_binding(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn drive_settings_become_daemon_arguments() {

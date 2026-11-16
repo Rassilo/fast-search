@@ -24,6 +24,16 @@ pub struct Mods {
 }
 
 /// Something that happened, in terms the application understands.
+/// What the mouse pointer looks like.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Cursor {
+    Arrow,
+    /// The I-beam, over text that can be edited.
+    Text,
+    /// Over a window edge that resizes: 0 top-left, clockwise to 7 left.
+    Resize(u32),
+}
+
 #[derive(Debug)]
 #[allow(dead_code)] // every event names its window, needed or not
 pub enum Event {
@@ -83,6 +93,8 @@ pub trait Backend {
     /// Hands the current mouse press to the desktop as a window move, or
     /// a resize from an edge (0 top-left, then clockwise to 7 left).
     fn start_move(&mut self);
+    /// The mouse pointer's shape over the main window.
+    fn set_cursor(&mut self, cursor: Cursor);
     fn start_resize(&mut self, edge: u32);
     fn minimize(&mut self);
     fn toggle_maximize(&mut self);

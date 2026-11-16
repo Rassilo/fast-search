@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::time::Duration;
 
-use crate::backend::{Backend, Event, Mods, Win, WindowSpec};
+use crate::backend::{Backend, Cursor, Event, Mods, Win, WindowSpec};
 use crate::canvas::{Canvas, Icon};
 use crate::debug;
 use crate::x11::P::*;
@@ -191,6 +191,11 @@ pub fn hold_clipboard(file: bool) -> io::Result<()> {
 pub struct X11 {
     c: Conn,
     win: u32,
+    /// The pointer shape shown, the standard cursor font (0 until it
+    /// is needed) and the cursors made from it so far.
+    cursor: Cursor,
+    cursor_font: u32,
+    cursors: Vec<(Cursor, u32)>,
     gc: u32,
     /// The dialog window, or 0.
     dialog: u32,
@@ -275,6 +280,9 @@ impl X11 {
 
         let mut x = X11 {
             win,
+            cursor: Cursor::Arrow,
+            cursor_font: 0,
+            cursors: Vec::new(),
             gc,
             dialog: 0,
             shown: [Vec::new(), Vec::new()],
@@ -653,6 +661,37 @@ impl Backend for X11 {
 
     fn start_move(&mut self) {
         self.start_resize(8);
+    }
+
+    fn set_cursor(&mut self, cursor: Cursor) {
+        if std::mem::replace(&mut self.cursor, cursor) == cursor {
+            return;
+        }
+        // Glyphs of the X "cursor" font; each is followed by its mask.
+        let glyph = match cursor {
+            Cursor::Arrow => None,
+            Cursor::Text => Some(152), // xterm
+            // top-left corner, top side, top-right, right, bottom-right, bottom, bottom-left, left
+            Cursor::Resize(edge) => Some([134u16, 138, 136, 96, 14, 16, 12, 70][edge as usize % 8]),
+        };
+        let id = match (glyph, self.cursors.iter().find(|(c, _)| *c == cursor)) {
+            (None, _) => 0, // the desktop's own arrow
+            (_, Some(&(_, id))) => id,
+            (Some(glyph), None) => {
+                if self.cursor_font == 0 {
+                    self.cursor_font = self.c.new_id();
+                    self.c.req(45, 0, &[W(self.cursor_font), H(6), H(0), S(b"cursor")]); // OpenFont
+                }
+                let id = self.c.new_id();
+                let font = self.cursor_font;
+                // CreateGlyphCursor: black with a white outline.
+                self.c.req(94, 0, &[W(id), W(font), W(font), H(glyph), H(glyph + 1), H(0), H(0), H(0), H(0xffff), H(0xffff), H(0xffff)]);
+                self.cursors.push((cursor, id));
+                id
+            }
+        };
+        self.c.req(2, 0, &[W(self.win), W(0x4000), W(id)]); // ChangeWindowAttributes: cursor
+        let _ = self.c.flush();
     }
 
     fn start_resize(&mut self, edge: u32) {

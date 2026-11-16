@@ -12,7 +12,7 @@ use std::os::unix::fs::FileExt;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-use crate::backend::{Backend, Event, Key, Mods, Win, WindowSpec};
+use crate::backend::{Backend, Cursor, Event, Key, Mods, Win, WindowSpec};
 use crate::canvas::Canvas;
 use crate::debug;
 use crate::xkb::{self, Keymap};
@@ -389,6 +389,10 @@ pub struct Wayland {
 
     pointer: u32,
     cursor_device: u32,
+    /// The shape wanted over the main window, and the serial of the
+    /// pointer's last entry, which a change of shape must quote.
+    cursor: Cursor,
+    enter_serial: u32,
     cursor_surface: u32,
     pointer_focus: Option<Win>,
     pointer_at: (i32, i32),
@@ -459,6 +463,8 @@ impl Wayland {
             announced: (0, 0),
             pointer: 0,
             cursor_device: 0,
+            cursor: Cursor::Arrow,
+            enter_serial: 0,
             cursor_surface: 0,
             pointer_focus: None,
             pointer_at: (0, 0),
@@ -927,6 +933,7 @@ impl Wayland {
                 self.serial = serial;
                 self.pointer_focus = self.win_of_surface(surface);
                 self.pointer_at = (px(a.fixed()), px(a.fixed()));
+                self.enter_serial = serial;
                 self.set_cursor(serial);
                 if let Some(win) = self.pointer_focus {
                     let (x, y) = self.pointer_at;
@@ -1060,10 +1067,18 @@ impl Wayland {
         Ok(())
     }
 
-    /// Shows the arrow cursor over our windows.
+    /// Shows the wanted cursor over the main window, the arrow elsewhere.
     fn set_cursor(&mut self, serial: u32) {
         if self.cursor_device != 0 {
-            self.w.send(self.cursor_device, 1, &[U(serial), U(1)]); // set_shape: default
+            // wp_cursor_shape_device_v1 shapes, named as in CSS.
+            let shape = match self.cursor {
+                _ if self.pointer_focus != Some(Win::Main) => 1, // default
+                Cursor::Arrow => 1,
+                Cursor::Text => 9,
+                // nw, n, ne, e, se, s, sw, w
+                Cursor::Resize(edge) => [21, 19, 20, 18, 23, 22, 24, 25][edge as usize % 8],
+            };
+            self.w.send(self.cursor_device, 1, &[U(serial), U(shape)]); // set_shape
             return;
         }
         // No cursor-shape protocol: a small arrow of our own.
@@ -1219,6 +1234,12 @@ impl Backend for Wayland {
     fn start_move(&mut self) {
         if let Some(window) = self.window(self.press_win) {
             self.w.send(window.toplevel, 5, &[U(self.seat), U(self.press_serial)]);
+        }
+    }
+
+    fn set_cursor(&mut self, cursor: Cursor) {
+        if std::mem::replace(&mut self.cursor, cursor) != cursor && self.pointer_focus == Some(Win::Main) {
+            self.set_cursor(self.enter_serial);
         }
     }
 

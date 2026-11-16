@@ -24,7 +24,7 @@ use ff_core::{BuildOptions, CaseMode, Index, Kind, Query, SearchOptions, Sort, d
 use dialog::{Dialog, NavItem, Row};
 use i18n::{tr, trf};
 use settings::Config;
-use backend::{Backend, Event, Key, Mods, Win, WindowSpec};
+use backend::{Backend, Cursor, Event, Key, Mods, Win, WindowSpec};
 use x11::*;
 
 const USAGE: &str = "\
@@ -33,7 +33,8 @@ Fast search (ff-gui) - instant file search window
 USAGE:
   ff-gui [--db FILE] [QUERY...]
   ff-gui --install     add Fast search to the applications menu, with its icon
-  ff-gui --shortcut on|off   make Alt+E open Fast search (GNOME), or undo it
+  ff-gui --shortcut on|off|KEYS   make a global shortcut open Fast search
+                       (GNOME): Alt+E, or the KEYS you give, e.g. Ctrl+Alt+F
 
 KEYS:
   type               search as you type (same term syntax as `ff`)
@@ -78,6 +79,8 @@ ENVIRONMENT:
 
 /// Text height in pixels at 100% scale.
 const FONT_PX: f32 = 14.5;
+/// Side of the resize grip in the bottom-right corner, in layout units.
+const GRIP: i32 = 16;
 
 const WHITE: u32 = 0xffffff;
 const PANEL: u32 = 0xf2f2f2;
@@ -153,6 +156,8 @@ enum Action {
     ZoomReset,
     ToggleTitleBar,
     ToggleShortcut,
+    /// Use the keys typed in the Options window as the global shortcut.
+    SetShortcut,
     ToggleLauncher,
     ToggleDaemon,
 }
@@ -264,7 +269,7 @@ const BAR: [(&str, Items); 5] = [
             ("Zoom out", "Ctrl+-", Action::ZoomOut),
             ("Reset zoom", "Ctrl+0", Action::ZoomReset),
             ("Title bar with icon", "", Action::ToggleTitleBar),
-            ("Global shortcut Alt+E", "", Action::ToggleShortcut),
+            ("Global shortcut", "", Action::ToggleShortcut),
             ("Show in applications menu", "", Action::ToggleLauncher),
             ("Live updates service", "asks for password", Action::ToggleDaemon),
         ],
@@ -299,6 +304,8 @@ struct App {
     dragging: Option<String>,
     /// The files of the last drag, to forget them if they were moved away.
     drag_paths: String,
+    /// The dragged files may not be moved away, only copied.
+    drag_copy_only: bool,
     cv: Canvas,
     text: Text,
     icons: Icons,
@@ -356,6 +363,8 @@ struct App {
     notice_tx: mpsc::Sender<String>,
     /// State of the Options toggles, refreshed when the menu opens.
     shortcut_on: bool,
+    /// The keys of the global shortcut, as in "Ctrl+Alt+F".
+    shortcut_keys: String,
     launcher_on: bool,
     daemon_on: bool,
     /// We draw the title bar ourselves (so it can show the app icon).
@@ -423,17 +432,29 @@ fn main() -> ExitCode {
             }
             "--db" => db = args.next().map(PathBuf::from),
             "--shortcut" => {
-                let on = match args.next().as_deref() {
-                    Some("on") => true,
-                    Some("off") => false,
-                    _ => {
-                        eprintln!("ff-gui: --shortcut takes on or off");
+                // "on" uses the keys chosen before (Alt+E at first).
+                let mut config = Config::load();
+                let saved = config.more.get("shortcut").cloned().unwrap_or_else(|| settings::DEFAULT_SHORTCUT.into());
+                let (on, keys) = match args.next().as_deref() {
+                    Some("on") => (true, saved),
+                    Some("off") => (false, saved),
+                    Some(keys) => match settings::shortcut_binding(keys) {
+                        Ok(binding) => (true, settings::shortcut_label(&binding)),
+                        Err(e) => {
+                            eprintln!("ff-gui: {e}");
+                            return ExitCode::from(2);
+                        }
+                    },
+                    None => {
+                        eprintln!("ff-gui: --shortcut takes on, off or the keys, such as Ctrl+Alt+F");
                         return ExitCode::from(2);
                     }
                 };
-                return match settings::set_shortcut(on) {
+                return match settings::set_shortcut(on, &keys) {
                     Ok(true) => {
-                        println!("Alt+E now opens Fast search");
+                        config.more.insert("shortcut".into(), keys.clone());
+                        let _ = config.save();
+                        println!("{keys} now opens Fast search");
                         ExitCode::SUCCESS
                     }
                     Ok(false) => {
@@ -487,6 +508,45 @@ fn main() -> ExitCode {
     }
 }
 
+/// Asks the kernel whether we may use a file in a way (`mode`: 4 read,
+/// 2 write, 1 search). `None` if that could not be told, for instance
+/// because the file is gone: the action itself then reports it.
+fn access(path: &std::path::Path, mode: i32) -> Option<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    unsafe extern "C" {
+        fn access(path: *const std::ffi::c_char, mode: std::ffi::c_int) -> std::ffi::c_int;
+    }
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `path` is a NUL-terminated string that outlives the call.
+    if unsafe { access(path.as_ptr(), mode) } == 0 {
+        return Some(true);
+    }
+    match io::Error::last_os_error().kind() {
+        io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => Some(false),
+        _ => None,
+    }
+}
+
+/// False if we may not open the file, or list the folder.
+fn may_read(path: &std::path::Path) -> bool {
+    let mode = if path.is_dir() { 4 | 1 } else { 4 };
+    access(path, mode) != Some(false)
+}
+
+/// False if we may not remove the file from its folder (to delete it,
+/// trash it or move it). That is decided by the folder, not the file;
+/// in a "sticky" folder such as /tmp only the owner may.
+fn may_delete(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Some(folder) = path.parent() else { return false }; // the root itself
+    if access(folder, 2 | 1) == Some(false) {
+        return false;
+    }
+    let (Ok(inside), Ok(holder)) = (path.symlink_metadata(), folder.metadata()) else { return true };
+    let me = std::fs::metadata("/proc/self").map_or(holder.uid(), |m| m.uid());
+    holder.mode() & 0o1000 == 0 || me == 0 || me == inside.uid() || me == holder.uid()
+}
+
 fn debug(msg: impl AsRef<str>) {
     debug::log(msg);
 }
@@ -528,6 +588,7 @@ impl App {
             drag_arm: None,
             dragging: None,
             drag_paths: String::new(),
+            drag_copy_only: false,
             cv: Canvas::new(),
             size_w: text.width("000,000,000 KB") + 16 * u,
             date_w: text.width("0000-00-00 00:00") + 16 * u,
@@ -572,6 +633,7 @@ impl App {
             notices,
             notice_tx,
             shortcut_on: false,
+            shortcut_keys: config.more.get("shortcut").cloned().unwrap_or_else(|| settings::DEFAULT_SHORTCUT.into()),
             launcher_on: false,
             daemon_on: false,
             custom_title,
@@ -649,6 +711,7 @@ impl App {
             Ok("options1") => self.act(Action::Options(1), 0),
             Ok("options2") => self.act(Action::Options(2), 0),
             Ok("options3") => self.act(Action::Options(3), 0),
+            Ok("options4") => self.act(Action::Options(4), 0),
             Ok("drives") => self.act(Action::Options(6), 0),
             Ok("apply-preview") => {
                 // Ticks the first unmounted NTFS drive and prints the daemon
@@ -848,6 +911,8 @@ impl App {
                 Event::Motion { x, y, mods, .. } => {
                     let hover = self.title_button_at(x, y);
                     dirty |= std::mem::replace(&mut self.hover_button, hover) != hover;
+                    let cursor = self.cursor_at(x, y);
+                    self.b.set_cursor(cursor);
                     dirty |= self.motion(x, y, mods)?;
                 }
                 Event::Paste(text) => {
@@ -1076,6 +1141,12 @@ impl App {
             self.on_tree_target(|app| app.act(action, time));
             return;
         }
+        // What the user may not do to these files is not attempted:
+        // this also stops the keys that stand for a greyed menu entry.
+        if let Some(why) = self.refusal(action) {
+            self.status = tr(why).into();
+            return;
+        }
         // First the actions that do not need a selected result.
         let (a, b) = self.selection();
         match action {
@@ -1297,11 +1368,31 @@ impl App {
                 return self.save_config();
             }
             Action::ToggleShortcut => {
-                self.status = match settings::set_shortcut(!settings::shortcut_enabled()) {
-                    Ok(true) => "Alt+E now opens Fast search".into(),
+                self.status = match settings::set_shortcut(!settings::shortcut_enabled(), &self.shortcut_keys) {
+                    Ok(true) => trf("{} now opens Fast search", &[&self.shortcut_keys]),
                     Ok(false) => "Global shortcut removed".into(),
                     Err(e) => format!("could not change the shortcut: {e}"),
                 };
+                return;
+            }
+            Action::SetShortcut => {
+                let typed = std::mem::take(&mut self.dialog_input);
+                let keys = match settings::shortcut_binding(&typed) {
+                    Ok(binding) => settings::shortcut_label(&binding),
+                    Err(e) => return self.status = e,
+                };
+                match settings::set_shortcut(true, &keys) {
+                    Ok(_) => {
+                        self.status = trf("{} now opens Fast search", &[&keys]);
+                        self.shortcut_keys = keys;
+                        let status = std::mem::take(&mut self.status);
+                        self.save_config();
+                        if self.status.is_empty() {
+                            self.status = status;
+                        }
+                    }
+                    Err(e) => self.status = format!("could not change the shortcut: {e}"),
+                }
                 return;
             }
             Action::ToggleLauncher => {
@@ -1505,7 +1596,12 @@ impl App {
             4 => (
                 "Desktop",
                 vec![
-                    Row::Check("Global shortcut Alt+E opens Fast search", Action::ToggleShortcut),
+                    Row::Check("A global shortcut opens Fast search", Action::ToggleShortcut),
+                    Row::Pair("Shortcut", self.shortcut_keys.clone()),
+                    Row::Dim("To change it, type the keys, such as Ctrl+Alt+F, and press Enter:".into()),
+                    Row::Input("Ctrl+Alt+F", Action::SetShortcut),
+                    // What came of the last change, or why it was refused.
+                    Row::Dim(self.status.clone()),
                     Row::Check("Show in the applications menu", Action::ToggleLauncher),
                 ],
             ),
@@ -1676,6 +1772,9 @@ impl App {
     /// Re-reads the state of the options that live outside this program.
     fn refresh_option_states(&mut self) {
         self.shortcut_on = settings::shortcut_enabled();
+        if let Some(keys) = settings::current_shortcut() {
+            self.shortcut_keys = keys;
+        }
         self.launcher_on = settings::launcher_installed();
         self.daemon_on = settings::daemon_installed();
     }
@@ -1812,6 +1911,7 @@ impl App {
         more.insert("size_format".into(), self.size_format.to_string());
         more.insert("theme".into(), self.theme.to_string());
         more.insert("language".into(), self.language.to_string());
+        more.insert("shortcut".into(), self.shortcut_keys.clone());
         let config = Config { scale, own_title_bar: self.custom_title, regex: self.regex, whole_word: self.whole_word, case, more };
         if let Err(e) = config.save() {
             self.status = format!("could not save settings: {e}");
@@ -1865,8 +1965,25 @@ impl App {
     }
 
     /// Resize direction if (x, y) is on the window's edge.
+    /// The pointer shape for a position in the main window.
+    fn cursor_at(&mut self, x: i32, y: i32) -> Cursor {
+        let covered = self.menu.is_some() || self.props.is_some() || self.about || self.dialog.is_some();
+        let on_frame = self.custom_title && self.title_button_at(x, y).is_none();
+        if let Some(edge) = self.resize_edge(x, y).filter(|_| on_frame && !covered) {
+            Cursor::Resize(edge)
+        } else if !covered && self.tree.is_none() && y >= self.menu_h() + 6 * self.u && y < self.box_h() - 6 * self.u && x >= 6 * self.u && x < self.cv.w as i32 - 6 * self.u {
+            Cursor::Text // the search box
+        } else {
+            Cursor::Arrow
+        }
+    }
+
     fn resize_edge(&self, x: i32, y: i32) -> Option<u32> {
         let (w, h, m) = (self.cv.w as i32, self.cv.h as i32, 5 * self.u);
+        // The bottom-right corner is larger: it shows a grip to grab.
+        if x >= w - GRIP * self.u && y >= h - GRIP * self.u {
+            return Some(4);
+        }
         let (left, right, top, bottom) = (x < m, x >= w - m, y < m, y >= h - m);
         // _NET_WM_MOVERESIZE: 0 top-left, then clockwise to 7 left.
         match (left, right, top, bottom) {
@@ -2244,7 +2361,7 @@ impl App {
                 }
                 // A press on a selected result may turn into a drag once
                 // the pointer moves; it carries the whole selection.
-                if self.is_selected(row) {
+                if self.is_selected(row) && self.refusal(Action::CopyFile).is_none() {
                     let paths: Vec<String> = self.selected_paths().iter().map(|p| p.to_string_lossy().into_owned()).collect();
                     let id = self.hits[row];
                     let icon = match paths.len() {
@@ -2286,7 +2403,7 @@ impl App {
     /// Pointer moved; returns true if something needs redrawing.
     fn motion(&mut self, x: i32, y: i32, mods: Mods) -> io::Result<bool> {
         if self.dragging.is_some() {
-            self.b.drag_wants_copy(mods.ctrl);
+            self.b.drag_wants_copy(mods.ctrl || self.drag_copy_only);
             return Ok(false);
         }
         // A pressed result that has moved far enough becomes a drag.
@@ -2298,8 +2415,14 @@ impl App {
             }
             let label = drag_label(&arm.paths);
             let image = self.drag_image(&label, arm.icon);
-            self.b.start_drag(&arm.paths, &image, mods.ctrl)?;
-            self.status = trf("Dragging {} - drop it on another window to move it (hold Ctrl to copy)", &[&label]);
+            // Files that may not be removed from where they are can only
+            // be copied.
+            self.drag_copy_only = self.refusal(Action::Trash).is_some();
+            self.b.start_drag(&arm.paths, &image, mods.ctrl || self.drag_copy_only)?;
+            self.status = match self.drag_copy_only {
+                true => trf("Dragging {} - drop it on another window to copy it", &[&label]),
+                false => trf("Dragging {} - drop it on another window to move it (hold Ctrl to copy)", &[&label]),
+            };
             self.drag_paths = arm.paths;
             self.dragging = Some(label);
             return Ok(true);
@@ -2573,7 +2696,17 @@ impl App {
         } else {
             self.status.clone()
         };
-        self.text.draw(&mut self.cv, pad, y + 3 * u, &status, w - 2 * pad, TEXT);
+        let grip = if self.custom_title { GRIP * u } else { 0 };
+        self.text.draw(&mut self.cv, pad, y + 3 * u, &status, w - 2 * pad - grip, TEXT);
+        // The resize grip: dots in a triangle in the corner.
+        if self.custom_title {
+            let dot = ((2.0 * self.scale).round() as i32).max(2);
+            for row in 0..4 {
+                for col in (3 - row)..4 {
+                    self.cv.fill(w - 3 * u - (4 - col) * 2 * dot, h - 3 * u - (4 - row) * 2 * dot, dot, dot, 0x767676);
+                }
+            }
+        }
 
         if let Some(menu) = self.menu.take() {
             self.draw_menu(&menu);
@@ -2592,6 +2725,30 @@ impl App {
         self.present()
     }
 
+    /// Why `action` cannot be done to the selected files, if it cannot:
+    /// its menu entry is greyed and its shortcut only says why.
+    fn refusal(&mut self, action: Action) -> Option<&'static str> {
+        let delete = match action {
+            Action::Trash | Action::DeleteForever => true,
+            Action::Open | Action::Edit | Action::CopyFile => false,
+            _ => return None,
+        };
+        if self.tree.is_some() {
+            return self.on_tree_target(|app| app.refusal(action)).flatten();
+        }
+        // A huge selection is not checked to the end: what cannot be
+        // done is then reported when it is tried.
+        let blocked = self.selected_rows().into_iter().take(200).any(|row| {
+            let path = self.index.path(self.hits[row]);
+            if delete { !may_delete(&path) } else { !may_read(&path) }
+        });
+        match (blocked, delete) {
+            (false, _) => None,
+            (true, true) => Some("You do not have permission to delete or move this"),
+            (true, false) => Some("You do not have permission to read this"),
+        }
+    }
+
     fn draw_menu(&mut self, menu: &Menu) {
         let (u, row_h) = (self.u, self.row_h());
         let (x, y, w, h) = self.menu_rect(menu);
@@ -2600,17 +2757,20 @@ impl App {
         self.cv.frame(x, y, w, h, u.max(1), 0x9a9a9a);
         for (i, (label, shortcut, action)) in menu.items.iter().enumerate() {
             let iy = y + 4 * u + i as i32 * row_h;
-            if menu.hover == Some(i) {
+            // Entries the user has no permission for are greyed.
+            let off = self.refusal(*action).is_some();
+            if menu.hover == Some(i) && !off {
                 self.cv.fill(x + u, iy, w - 2 * u, row_h, HOVER);
             }
             // A bullet marks active choices and switched-on options.
             if self.checked(*action) {
                 self.text.draw(&mut self.cv, x + 6 * u, iy + 3 * u, "\u{2022}", w, TEXT);
             }
-            self.text.draw(&mut self.cv, x + 18 * u, iy + 3 * u, tr(label), w, TEXT);
-            let shortcut = &tr(shortcut);
+            self.text.draw(&mut self.cv, x + 18 * u, iy + 3 * u, tr(label), w, if off { 0xa8a8a8 } else { TEXT });
+            // The global shortcut's keys are the user's choice.
+            let shortcut = if *action == Action::ToggleShortcut { self.shortcut_keys.as_str() } else { tr(shortcut) };
             let sx = x + w - 14 * u - self.text.width(shortcut);
-            self.text.draw(&mut self.cv, sx, iy + 3 * u, shortcut, w, DIM);
+            self.text.draw(&mut self.cv, sx, iy + 3 * u, shortcut, w, if off { 0xa8a8a8 } else { DIM });
         }
     }
 
@@ -2669,5 +2829,42 @@ impl App {
     /// Shows the frame in the main window.
     fn present(&mut self) -> io::Result<()> {
         self.b.present(Win::Main, &self.cv)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn permissions_decide_what_may_be_done() {
+        // Root may do anything, which would make this test say nothing.
+        if std::fs::metadata("/proc/self").is_ok_and(|m| std::os::unix::fs::MetadataExt::uid(&m) == 0) {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("ff_gui_perm_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("locked")).unwrap();
+        let (mine, secret, kept) = (dir.join("mine.txt"), dir.join("secret.txt"), dir.join("locked/kept.txt"));
+        for file in [&mine, &secret, &kept] {
+            std::fs::write(file, "x").unwrap();
+        }
+        let mode = |path: &std::path::Path, mode| std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        mode(&secret, 0o000);
+        mode(&dir.join("locked"), 0o555);
+
+        assert!(may_read(&mine) && may_delete(&mine));
+        // Unreadable, but its folder is ours: it can still be deleted.
+        assert!(!may_read(&secret) && may_delete(&secret));
+        // Readable, but its folder cannot be changed.
+        assert!(may_read(&kept) && !may_delete(&kept));
+        // System files, and a file that is gone (left to the action itself).
+        assert!(!may_delete(std::path::Path::new("/etc/hostname")) || !std::path::Path::new("/etc/hostname").exists());
+        assert!(!may_delete(std::path::Path::new("/")));
+        assert!(may_read(&dir.join("gone.txt")) && may_delete(&dir.join("gone.txt")));
+
+        mode(&dir.join("locked"), 0o755);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

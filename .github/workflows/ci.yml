@@ -1,0 +1,80 @@
+name: CI
+
+# Every push to master and every pull request: the window is started for
+# real on an X server and on several Wayland compositors, and must draw
+# each of its views. Nothing else is tested here.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - run: cargo build --release
+      # The binaries are static, so every job below can run this one build.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: |
+            target/x86_64-unknown-linux-musl/release/ff
+            target/x86_64-unknown-linux-musl/release/ff-gui
+          retention-days: 3
+
+  draw:
+    name: Draws on ${{ matrix.name }}
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "X11 (Xvfb)",              packages: "xvfb xauth",                run: "xvfb-run -a -s '-screen 0 1280x1024x24' tests/gui-smoke.sh x11" }
+          - { name: "Wayland: Sway (wlroots)",  packages: sway,                   run: "tests/gui-smoke.sh wayland sway" }
+          - { name: "Wayland: labwc (wlroots)", packages: labwc,                  run: "tests/gui-smoke.sh wayland labwc" }
+          - { name: "Wayland: Weston",          packages: weston,                 run: "tests/gui-smoke.sh wayland weston" }
+          - { name: "Wayland: Mutter (GNOME)",  packages: "mutter dbus libgl1-mesa-dri libegl1",         run: "tests/gui-smoke.sh wayland mutter" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: bin
+
+      - name: Install the display server and a font
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fontconfig fonts-dejavu-core ${{ matrix.packages }}
+          chmod +x bin/ff bin/ff-gui
+
+      - name: Draw every view
+        run: FF_BIN=$PWD/bin KEEP=1 ${{ matrix.run }}
+
+      - name: Keep the pictures if something failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pictures-${{ strategy.job-index }}
+          path: /tmp/tmp.*/
+          if-no-files-found: ignore

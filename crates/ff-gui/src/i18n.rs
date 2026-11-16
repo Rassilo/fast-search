@@ -56,7 +56,7 @@ pub fn trf(template: &str, values: &[&dyn std::fmt::Display]) -> String {
 }
 
 /// English text and its [French, Spanish, Italian] translations.
-const TEXTS: [(&str, [&str; 3]); 249] = [
+const TEXTS: [(&str, [&str; 3]); 255] = [
     ("File", ["Fichier", "Archivo", "File"]),
     ("Edit", ["Édition", "Editar", "Modifica"]),
     ("View", ["Affichage", "Ver", "Visualizza"]),
@@ -91,7 +91,7 @@ const TEXTS: [(&str, [&str; 3]); 249] = [
     ("Zoom out", ["Zoom arrière", "Alejar", "Riduci"]),
     ("Reset zoom", ["Réinitialiser le zoom", "Restablecer el zoom", "Reimposta lo zoom"]),
     ("Title bar with icon", ["Barre de titre avec icône", "Barra de título con icono", "Barra del titolo con icona"]),
-    ("Global shortcut Alt+E", ["Raccourci global Alt+E", "Atajo global Alt+E", "Scorciatoia globale Alt+E"]),
+    ("Global shortcut", ["Raccourci global", "Atajo global", "Scorciatoia globale"]),
     ("Show in applications menu", ["Afficher dans le menu des applications", "Mostrar en el menú de aplicaciones", "Mostra nel menu delle applicazioni"]),
     ("Live updates service", ["Service de mise à jour en direct", "Servicio de actualización en vivo", "Servizio di aggiornamento in tempo reale"]),
     ("asks for password", ["demande le mot de passe", "pide la contraseña", "chiede la password"]),
@@ -211,7 +211,10 @@ const TEXTS: [(&str, [&str; 3]); 249] = [
     ("Size format", ["Format des tailles", "Formato de tamaño", "Formato delle dimensioni"]),
     ("Auto (B, KB, MB, GB)", ["Auto (o, Ko, Mo, Go)", "Auto (B, KB, MB, GB)", "Auto (B, KB, MB, GB)"]),
     ("Bytes", ["Octets", "Bytes", "Byte"]),
-    ("Global shortcut Alt+E opens Fast search", ["Le raccourci global Alt+E ouvre Fast search", "El atajo global Alt+E abre Fast search", "La scorciatoia globale Alt+E apre Fast search"]),
+    ("A global shortcut opens Fast search", ["Un raccourci global ouvre Fast search", "Un atajo global abre Fast search", "Una scorciatoia globale apre Fast search"]),
+    ("Shortcut", ["Raccourci", "Atajo", "Scorciatoia"]),
+    ("To change it, type the keys, such as Ctrl+Alt+F, and press Enter:", ["Pour le changer, tapez les touches, par exemple Ctrl+Alt+F, puis Entrée :", "Para cambiarlo, escriba las teclas, por ejemplo Ctrl+Alt+F, y pulse Intro:", "Per cambiarla, digita i tasti, ad esempio Ctrl+Alt+F, e premi Invio:"]),
+    ("{} now opens Fast search", ["{} ouvre maintenant Fast search", "{} ahora abre Fast search", "{} ora apre Fast search"]),
     ("Show in the applications menu", ["Afficher dans le menu des applications", "Mostrar en el menú de aplicaciones", "Mostra nel menu delle applicazioni"]),
     ("Keep the index current with the live updates service", ["Tenir l'index à jour avec le service de mise à jour en direct", "Mantener el índice actualizado con el servicio en vivo", "Mantieni l'indice aggiornato con il servizio in tempo reale"]),
     ("Switching it asks for your password. Everyone in your group can then", ["Le changer demande votre mot de passe. Tous les membres de votre groupe pourront", "Cambiarlo pide su contraseña. Todos los miembros de su grupo podrán", "Cambiarlo richiede la password. Tutti i membri del tuo gruppo potranno"]),
@@ -306,6 +309,9 @@ const TEXTS: [(&str, [&str; 3]); 249] = [
     ("Everything in this folder is empty", ["Tout le contenu de ce dossier est vide", "Todo en esta carpeta está vacío", "Tutto in questa cartella è vuoto"]),
     ("The index is empty", ["L'index est vide", "El índice está vacío", "L'indice è vuoto"]),
     ("folder sizes: what takes the space", ["taille des dossiers : ce qui occupe l'espace", "tamaño de las carpetas: qué ocupa el espacio", "dimensione delle cartelle: cosa occupa lo spazio"]),
+    ("You do not have permission to delete or move this", ["Vous n'avez pas la permission de supprimer ou déplacer cet élément", "No tiene permiso para eliminar o mover esto", "Non hai il permesso di eliminare o spostare questo elemento"]),
+    ("You do not have permission to read this", ["Vous n'avez pas la permission de lire cet élément", "No tiene permiso para leer esto", "Non hai il permesso di leggere questo elemento"]),
+    ("Dragging {} - drop it on another window to copy it", ["Glissement de {} - déposez-le sur une autre fenêtre pour le copier", "Arrastrando {} - suéltelo en otra ventana para copiarlo", "Trascinamento di {} - rilascialo su un'altra finestra per copiarlo"]),
 ];
 
 #[cfg(test)]

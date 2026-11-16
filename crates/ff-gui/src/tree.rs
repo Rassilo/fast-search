@@ -566,6 +566,9 @@ impl App {
         // Where the search box was: the path of the selected entry.
         let top = self.menu_h();
         let path = tree.selected().map(|id| self.index.path(id).display().to_string()).unwrap_or_default();
+        // It cannot be edited, so it does not look like the search box.
+        self.cv.fill(6 * u, top + 6 * u, w - 12 * u, row_h + 2 * u, PANEL);
+        self.cv.frame(6 * u, top + 6 * u, w - 12 * u, row_h + 2 * u, u.max(1), LINE);
         let path_x = self.box_text_x();
         self.text.draw(&mut self.cv, path_x, top + 10 * u, &path, w - 28 * u, DIM);
 

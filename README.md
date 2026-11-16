@@ -163,6 +163,14 @@ applications menu.
 | Sort | click a column header; again to reverse |
 | Clear, then quit | Esc |
 
+### Global shortcut
+
+On GNOME, a keyboard shortcut can open the window from anywhere. Turn it
+on under **Options → Desktop**; it is Alt+E until you type other keys
+there, such as `Ctrl+Alt+F` or `Super+Space`. From a terminal:
+`ff-gui --shortcut on`, `ff-gui --shortcut Ctrl+Alt+F`,
+`ff-gui --shortcut off`.
+
 ### Folder sizes
 
 F6 swaps the results for a view of what takes the space. On the left is
@@ -318,6 +326,7 @@ download buttons point at the latest release, so they need no update.
 ```sh
 cargo test                    # unit tests, no root needed
 sudo tests/filesystems.sh     # the daemon on real filesystems
+tests/gui-smoke.sh wayland    # the window on your display (or: x11)
 ```
 
 `cargo test` covers the query engine (terms, regular expressions, filters,
@@ -335,6 +344,20 @@ It also mounts and unmounts a drive under a running daemon (`hotplug`) and
 indexes an unmounted drive directly (`raw`). It works in a temporary folder
 under `/var/tmp` and leaves the system's `ffd` service alone. Name filesystems to test only those:
 `sudo tests/filesystems.sh ext4 btrfs-subvol`.
+
+`tests/gui-smoke.sh` opens the window once per view (results, menus,
+dialogs, folder sizes) on a real display server and checks that it
+connects with the right backend, draws something and exits cleanly. It
+sends no keys or clicks. It can bring its own display, with no screen
+needed: `xvfb-run -a tests/gui-smoke.sh x11`, or
+`tests/gui-smoke.sh wayland sway` (also `labwc`, `weston`, `mutter`).
+
+Every push and pull request runs that drawing test on X11 and on those
+Wayland compositors (`.github/workflows/ci.yml`).
+
+The reasoning behind these three kinds of tests, what each one misses
+and the checklist before a release are in
+[docs/testing.md](testing.md).
 
 ## How it works
 
