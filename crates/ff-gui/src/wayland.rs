@@ -383,6 +383,12 @@ pub struct Wayland {
     wanted: (i32, i32),
     fixed_scale: Option<f32>,
     main: Window,
+    /// The main window's title, and whether we draw its title bar: to
+    /// make it again after it was hidden.
+    title: String,
+    own_title: bool,
+    /// The main window is taken down (closed but still running).
+    hidden: bool,
     dialog: Option<Window>,
     /// The pixel size last announced to the application.
     announced: (usize, usize),
@@ -459,6 +465,9 @@ impl Wayland {
             wanted: (spec.width, spec.height),
             fixed_scale: spec.scale,
             main: Window::default(),
+            title: spec.title.to_string(),
+            own_title: false,
+            hidden: false,
             dialog: None,
             announced: (0, 0),
             pointer: 0,
@@ -1203,6 +1212,9 @@ impl Backend for Wayland {
     }
 
     fn present(&mut self, win: Win, cv: &Canvas) -> io::Result<()> {
+        if win == Win::Main && self.hidden {
+            return Ok(()); // taken down: nothing to draw on
+        }
         let mut window = match win {
             Win::Main => std::mem::take(&mut self.main),
             Win::Dialog => match self.dialog.take() {
@@ -1223,6 +1235,7 @@ impl Backend for Wayland {
         if self.main.decoration == 0 {
             return true; // this compositor draws no title bars: it is ours to draw
         }
+        self.own_title = own;
         self.w.send(self.main.decoration, 1, &[U(if own { 1 } else { 2 })]); // set_mode
         own
     }
@@ -1247,6 +1260,43 @@ impl Backend for Wayland {
         // From "0 top-left, then clockwise" to xdg_toplevel's edge bits.
         let edges = [5, 1, 9, 8, 10, 2, 6, 4][edge as usize % 8];
         self.w.send(self.main.toplevel, 6, &[U(self.seat), U(self.press_serial), U(edges)]);
+    }
+
+    fn hide_to_tray(&mut self) -> bool {
+        // Wayland has no hidden windows: take it down, keeping its size,
+        // and make it again when asked.
+        self.close_dialog();
+        let main = std::mem::take(&mut self.main);
+        (self.main.lw, self.main.lh) = (main.lw, main.lh);
+        self.destroy_window(main);
+        for focus in [&mut self.pointer_focus, &mut self.keyboard_focus] {
+            *focus = None;
+        }
+        self.repeating = None;
+        self.hidden = true;
+        let _ = self.w.flush();
+        true
+    }
+
+    fn show(&mut self) {
+        if !std::mem::replace(&mut self.hidden, false) {
+            return;
+        }
+        let (lw, lh) = (self.main.lw, self.main.lh);
+        let title = self.title.clone();
+        self.main = self.create_window(Win::Main, &title);
+        if self.main.decoration != 0 {
+            self.w.send(self.main.decoration, 1, &[U(if self.own_title { 1 } else { 2 })]); // set_mode
+        }
+        self.w.send(self.main.toplevel, 8, &[I(360), I(200)]); // set_min_size
+        (self.main.lw, self.main.lh) = (lw, lh);
+        self.w.send(self.main.surface, 6, &[]); // commit: ask for the first configure
+        while !self.main.configured {
+            if self.step(None).is_err() {
+                return;
+            }
+        }
+        self.pending.push_back(Event::Redraw(Win::Main));
     }
 
     fn minimize(&mut self) {

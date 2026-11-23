@@ -8,6 +8,11 @@ use ff_core::group_digits;
 use ff_core::sizes::human_size as units;
 pub use ff_core::sizes::{Kept, Tile, Tree};
 
+/// "% of disk" bars, as Explorer colours its drives.
+const DISK_OK: u32 = 0x26a0da;
+/// The same once a drive is 90 % full or more.
+const DISK_FULL: u32 = 0xda2626;
+
 use crate::backend::{Key, Mods};
 use crate::canvas::{Icon, ON_ACCENT, palette};
 use crate::i18n::{tr, trf};
@@ -371,9 +376,11 @@ impl App {
                     self.text.draw(&mut self.cv, cx + cw - pad - cell_w, ty, &cell, cw, color);
                 }
             }
-            self.draw_share(cols[4], y, Some(share), selected);
+            self.draw_share(cols[4], y, Some(share), SELECT, selected);
             if cols[5].1 > 0 {
-                self.draw_share(cols[5], y, disk, selected);
+                // As Explorer draws drives: blue, red once 90 % full.
+                let color = if disk.is_some_and(|d| d >= 0.9) { DISK_FULL } else { DISK_OK };
+                self.draw_share(cols[5], y, disk, color, selected);
             }
             self.cv.clip = (0, right);
             // When it last changed: for a folder, its newest content.
@@ -450,7 +457,7 @@ impl App {
     /// A share as a bar in column `(x, w)` of the row at `y`, with its
     /// figure on it: white over the filled part, ink over the rest.
     /// Nothing is drawn for an unknown share.
-    fn draw_share(&mut self, (x, w): (i32, i32), y: i32, share: Option<f64>, selected: bool) {
+    fn draw_share(&mut self, (x, w): (i32, i32), y: i32, share: Option<f64>, color: u32, selected: bool) {
         let Some(share) = share.filter(|_| w > 0) else { return };
         let (u, row_h) = (self.u, self.row_h());
         let pad = 8 * u;
@@ -460,7 +467,7 @@ impl App {
         // On the selected (accent-filled) row the bar is inverted: white
         // fill on an outline of white, so it still shows.
         let (track, fill, ink_fill, ink_track) =
-            if selected { (SELECT, ON_ACCENT, SELECT, ON_ACCENT) } else { (LINE, SELECT, ON_ACCENT, TEXT) };
+            if selected { (SELECT, ON_ACCENT, SELECT, ON_ACCENT) } else { (LINE, color, ON_ACCENT, TEXT) };
         if selected {
             self.cv.round_frame(bx, ty, bw, bh, 3 * u, u.max(1), ON_ACCENT, track);
         } else {

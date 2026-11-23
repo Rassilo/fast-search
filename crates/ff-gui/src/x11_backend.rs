@@ -215,6 +215,7 @@ pub struct X11 {
     net_wm_state: u32,
     net_wm_maximized: [u32; 2],
     wm_change_state: u32,
+    net_active_window: u32,
     clip: ClipAtoms,
     dnd: DndAtoms,
 
@@ -301,6 +302,7 @@ impl X11 {
                 c.intern_atom("_NET_WM_STATE_MAXIMIZED_HORZ")?,
             ],
             wm_change_state: c.intern_atom("WM_CHANGE_STATE")?,
+            net_active_window: c.intern_atom("_NET_ACTIVE_WINDOW")?,
             clip,
             dnd: DndAtoms::intern(&mut c)?,
             copied: String::new(),
@@ -311,7 +313,10 @@ impl X11 {
             dropped: String::new(),
             c,
         };
-        x.c.req(8, 0, &[W(win)]); // MapWindow
+        // Started at sign-in: not shown until asked for.
+        if !spec.hidden {
+            x.c.req(8, 0, &[W(win)]); // MapWindow
+        }
         Ok(x)
     }
 
@@ -698,6 +703,22 @@ impl Backend for X11 {
         self.c.req(27, 0, &[W(0)]); // UngrabPointer, so the WM can grab it
         let (x, y) = self.pointer_root;
         self.wm_message(self.net_wm_moveresize, [x as u32, y as u32, edge, 1, 1]);
+    }
+
+    fn hide_to_tray(&mut self) -> bool {
+        self.close_dialog();
+        self.c.req(10, 0, &[W(self.win)]); // UnmapWindow
+        let _ = self.c.flush();
+        true
+    }
+
+    fn show(&mut self) {
+        self.c.req(8, 0, &[W(self.win)]); // MapWindow
+        // Ask the window manager to bring it forward and give it the
+        // keyboard: source 2 is a pager, which managers obey.
+        self.wm_message(self.net_active_window, [2, 0, 0, 0, 0]);
+        let _ = self.c.flush();
+        self.pending.push_back(Event::Redraw(Win::Main));
     }
 
     fn minimize(&mut self) {

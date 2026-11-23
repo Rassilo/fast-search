@@ -41,6 +41,37 @@ fn launch_path() -> io::Result<PathBuf> {
     }
 }
 
+/// The XDG autostart entry that starts Fast search at sign-in.
+#[cfg(not(windows))]
+fn autostart_file() -> io::Result<PathBuf> {
+    Ok(ff_core::os::config_dir().ok_or_else(|| other("HOME is not set"))?.join("autostart").join("ff-gui.desktop"))
+}
+
+/// True if Fast search starts at sign-in (hidden, in the background).
+#[cfg(not(windows))]
+pub fn autostart_enabled() -> bool {
+    autostart_file().is_ok_and(|f| f.exists())
+}
+
+/// Makes Fast search start at sign-in, hidden, or not.
+#[cfg(not(windows))]
+pub fn set_autostart(on: bool) -> io::Result<()> {
+    let file = autostart_file()?;
+    if !on {
+        return match fs::remove_file(&file) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+    }
+    let exe = launch_path()?;
+    let entry = format!(
+        "[Desktop Entry]\nType=Application\nName=Fast search\nComment=Keeps Fast search ready for its global shortcut\nExec=\"{}\" --hidden\nIcon=ff-gui\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\n",
+        exe.display()
+    );
+    fs::create_dir_all(file.parent().unwrap_or(Path::new(".")))?;
+    fs::write(&file, entry)
+}
+
 /// True if the desktop asks applications for a dark appearance.
 #[cfg(not(windows))]
 pub fn desktop_prefers_dark() -> bool {

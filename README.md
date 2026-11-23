@@ -365,7 +365,17 @@ Dusk (blue-grey dark) and Sand (warm light). By default it follows the
 desktop's light or dark preference; choose another in the **Theme** menu
 or under **Options → Interface**. The accent colour (selection, focus)
 is the desktop's (on Windows, its accent colour) unless you pick one of
-seven at the bottom of the **Theme** menu. The window is
+seven at the bottom of the **Theme** menu.
+
+One copy runs per user. Closing the window (or Esc on an empty search)
+keeps it running with the index loaded, hidden (on Windows, in the
+notification area; Linux desktops have no common tray), and the global
+shortcut or starting `ff-gui` again shows it at once. *File → Quit*
+(Ctrl+Q) exits. *Options → Desktop* turns the hiding off, and *Start at
+sign-in, hidden* adds the program to the session's start (on Linux an
+XDG autostart entry, `~/.config/autostart/ff-gui.desktop`).
+
+The window is
 available in English, French, Spanish and Italian (same page; it follows
 the system language by default). It follows the desktop scale (fractional scaling on Wayland, `Xft.dpi` on X11). Override with `FF_GUI_SCALE=1.5`
 and choose a font file with `FF_GUI_FONT=/path/to/font.ttf`.

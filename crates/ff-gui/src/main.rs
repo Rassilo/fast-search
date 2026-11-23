@@ -12,6 +12,8 @@ mod dialog;
 #[cfg(windows)]
 mod gdi_text;
 mod i18n;
+#[cfg(unix)]
+mod instance;
 mod keys;
 mod saved;
 mod settings;
@@ -55,8 +57,8 @@ USAGE:
   ff-gui --install     add Fast search to the applications menu, with its icon
   ff-gui --shortcut on|off|KEYS   make a global shortcut open Fast search
                        (GNOME): Alt+E, or the KEYS you give, e.g. Ctrl+Alt+F
-  ff-gui --hidden      (Windows) start in the notification area, no window:
-                       how it starts at sign-in
+  ff-gui --hidden      start without showing the window (on Windows, in the
+                       notification area): how it starts at sign-in
 
 KEYS:
   type               search as you type (same term syntax as `ff`)
@@ -153,7 +155,6 @@ enum Action {
     /// Colours: 0 follow the desktop, 1 light, 2 dark.
     Theme(u8),
     /// Start at sign-in, in the notification area (Windows).
-    #[cfg(windows)]
     ToggleAutostart,
     /// 0: the desktop's accent colour; n: canvas::ACCENTS[n - 1].
     Accent(u8),
@@ -528,6 +529,12 @@ struct App {
     /// Per root of the folder sizes tree: its drive's capacity and free
     /// space, where known.
     disks: Vec<(u32, (u64, u64))>,
+    /// The window is hidden, the program still running (closed with
+    /// "keep running", or started at sign-in).
+    hidden: bool,
+    /// Requests from later starts of the program to show the window.
+    #[cfg(unix)]
+    wake: Option<mpsc::Receiver<()>>,
     tile_hover: Option<u32>,
     /// The list of completions open under the search box.
     complete: Option<complete::Complete>,
@@ -651,6 +658,15 @@ fn run() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         if !hidden && win_tray::wake_running(WINDOW_TITLE) {
+            return ExitCode::SUCCESS;
+        }
+    }
+    #[cfg(unix)]
+    if std::env::var_os("FF_GUI_SNAPSHOT").is_none() && std::env::var_os("FF_GUI_TEST").is_none() {
+        if hidden && instance::running() {
+            return ExitCode::SUCCESS;
+        }
+        if !hidden && instance::wake_running() {
             return ExitCode::SUCCESS;
         }
     }
@@ -862,6 +878,11 @@ impl App {
             tree: None,
             tiles: Vec::new(),
             disks: Vec::new(),
+            hidden,
+            #[cfg(unix)]
+            wake: (std::env::var_os("FF_GUI_SNAPSHOT").is_none() && std::env::var_os("FF_GUI_TEST").is_none())
+                .then(instance::listen)
+                .flatten(),
             tile_hover: None,
             complete: None,
             bookmarks: ff_core::bookmarks::load(),
@@ -876,6 +897,12 @@ impl App {
         app.apply_title_bar();
         app.apply_theme();
         app.apply_hotkey();
+        // Started at sign-in: Windows made no window visible; elsewhere it
+        // is hidden now.
+        #[cfg(unix)]
+        if app.hidden {
+            app.hidden = app.b.hide_to_tray();
+        }
         app.apply_language();
         app.cv.resize((1000 * u) as usize, (640 * u) as usize);
         Ok(app)
@@ -1045,6 +1072,15 @@ impl App {
                 self.refresh_option_states();
                 self.render_dialog()?;
             }
+            // Another start of the program (such as the global shortcut)
+            // asked for the window (Linux; Windows sends a message).
+            #[cfg(unix)]
+            if self.wake.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
+                self.b.show();
+                self.hidden = false;
+                self.act(Action::SelectAll, 0);
+                dirty = true;
+            }
             // A message in the status bar goes away by itself, unless it
             // reports something still going on.
             if self.status != shown.0 {
@@ -1060,7 +1096,8 @@ impl App {
             // Redraw only once the event queue is drained.
             // While idle, wake once a second to notice a refreshed index.
             // While indexing, wake often to move the progress along.
-            let idle = if self.building.is_some() { Duration::from_millis(150) } else { Duration::from_secs(1) };
+            // Hidden (Linux), wake often to answer another start quickly.
+            let idle = if self.building.is_some() || (self.hidden && cfg!(unix)) { Duration::from_millis(150) } else { Duration::from_secs(1) };
             let wait = if dirty { Duration::ZERO } else { idle };
             let Some(event) = self.b.next_event(Some(wait))? else {
                 if !dirty {
@@ -1131,6 +1168,7 @@ impl App {
                 // Back from the notification area: typing replaces the
                 // last search.
                 Event::Shown => {
+                    self.hidden = false;
                     self.act(Action::SelectAll, 0);
                     dirty = true;
                 }
@@ -1728,11 +1766,10 @@ impl App {
                 }
                 return;
             }
-            #[cfg(windows)]
             Action::ToggleAutostart => {
                 let on = !settings::autostart_enabled();
                 self.status = match settings::set_autostart(on) {
-                    Ok(()) if on => "Fast search starts at sign-in, in the notification area".into(),
+                    Ok(()) if on => "Fast search starts at sign-in, hidden, ready for its shortcut".into(),
                     Ok(()) => "Fast search no longer starts at sign-in".into(),
                     Err(e) => format!("could not change the start at sign-in: {e}"),
                 };
@@ -1969,10 +2006,8 @@ impl App {
                     // What came of the last change, or why it was refused.
                     Row::Dim(self.status.clone()),
                     Row::Check("Show in the applications menu", Action::ToggleLauncher),
-                    #[cfg(windows)]
-                    Row::Check("Closing the window keeps it in the notification area", Action::Toggle(Flag::CloseToTray)),
-                    #[cfg(windows)]
-                    Row::Check("Start at sign-in, in the notification area", Action::ToggleAutostart),
+                    Row::Check("Closing the window keeps Fast search running, ready for its shortcut", Action::Toggle(Flag::CloseToTray)),
+                    Row::Check("Start at sign-in, hidden", Action::ToggleAutostart),
                 ],
             ),
             5 => (
@@ -2287,7 +2322,6 @@ impl App {
             Action::TreeSize => self.tree.is_some(),
             Action::Case(case) => case == self.case,
             Action::ToggleTitleBar => self.custom_title,
-            #[cfg(windows)]
             Action::ToggleAutostart => settings::autostart_enabled(),
             Action::ToggleShortcut => self.shortcut_on,
             Action::ToggleLauncher => self.launcher_on,
@@ -2419,7 +2453,8 @@ impl App {
     /// program should exit.
     fn dismiss(&mut self) -> bool {
         self.menu = None;
-        self.flag(Flag::CloseToTray) && self.b.hide_to_tray()
+        self.hidden = self.flag(Flag::CloseToTray) && self.b.hide_to_tray();
+        self.hidden
     }
 
     /// A left press on the title bar or window edge; true if handled.

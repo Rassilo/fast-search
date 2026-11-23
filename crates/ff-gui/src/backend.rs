@@ -90,8 +90,10 @@ pub trait Backend {
     /// Returns what is in effect: a desktop that draws no title bars
     /// leaves it to us whatever was asked.
     fn set_own_title_bar(&mut self, own: bool) -> bool;
-    /// Hides the main window to the notification area instead of closing
-    /// it, if the platform has one; false if it does not (then close).
+    /// Shows the main window again, in front, after `hide_to_tray`.
+    #[cfg_attr(windows, allow(dead_code))] // Windows shows on a window message
+    fn show(&mut self) {}
+
     /// Makes `keys` (as in "Ctrl+Alt+F") show the main window from anywhere
     /// while the program runs, or drops it (None). Platforms whose desktop
     /// keeps the shortcut itself (GNOME) do nothing here.
@@ -99,6 +101,9 @@ pub trait Backend {
         Ok(())
     }
 
+    /// Hides the main window to the notification area instead of closing
+    /// it (Windows), or just out of sight (elsewhere: there is no common
+    /// tray); false if it cannot (then close).
     fn hide_to_tray(&mut self) -> bool {
         false
     }
