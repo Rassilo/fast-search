@@ -38,6 +38,10 @@ pub const ON_ACCENT: u32 = 0xff_fffe;
 /// lighter in dark themes. See [`set_accent`].
 pub const ACCENT: u32 = 0xff_fffd;
 
+/// A red of the same lightness and strength as [`ACCENT`]: for warnings
+/// that sit beside accent-coloured things (a nearly full drive).
+pub const ACCENT_RED: u32 = 0xff_fffc;
+
 static ACCENT_RGB: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x00_67c0);
 
 /// Sets the colour [`ACCENT`] stands for.
@@ -133,8 +137,9 @@ pub fn tone(color: u32) -> u32 {
     if color == ON_ACCENT {
         return 0xff_ffff;
     }
-    if color == ACCENT {
+    if color == ACCENT || color == ACCENT_RED {
         let rgb = ACCENT_RGB.load(std::sync::atomic::Ordering::Relaxed);
+        let rgb = if color == ACCENT_RED { as_red(rgb) } else { rgb };
         if !dark {
             return rgb;
         }
@@ -699,4 +704,21 @@ impl Icons {
             cv.blend(x + (i % size) as i32, y + (i / size) as i32, [p[0], p[1], p[2]], p[3] as u32);
         }
     }
+}
+
+/// `rgb` turned red: the same lightness and saturation, the hue moved to
+/// red (0x0067c0, Windows blue, becomes 0xc01f00).
+fn as_red(rgb: u32) -> u32 {
+    let [r, g, b] = [(rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff].map(|c| c as f32 / 255.0);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let l = (max + min) / 2.0;
+    let s = if max == min { 0.0 } else { (max - min) / (1.0 - (2.0 * l - 1.0).abs()) };
+    // HSL back to RGB with the hue at red (0 degrees, nudged a little
+    // toward orange so it reads as red rather than crimson).
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let h: f32 = 8.0 / 60.0;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+    let byte = |v: f32| ((v + m).clamp(0.0, 1.0) * 255.0).round() as u32;
+    byte(c) << 16 | byte(x) << 8 | byte(0.0)
 }

@@ -8,10 +8,11 @@ use ff_core::group_digits;
 use ff_core::sizes::human_size as units;
 pub use ff_core::sizes::{Kept, Tile, Tree};
 
-/// "% of disk" bars, as Explorer colours its drives.
-const DISK_OK: u32 = 0x26a0da;
-/// The same once a drive is 90 % full or more.
-const DISK_FULL: u32 = 0xda2626;
+/// "% of disk" bars: the accent, as for "% of parent"...
+const DISK_OK: u32 = crate::SELECT;
+/// ... and a red of the same tone once a drive is 90 % full, as
+/// Explorer warns of full drives.
+const DISK_FULL: u32 = crate::canvas::ACCENT_RED;
 
 use crate::backend::{Key, Mods};
 use crate::canvas::{Icon, ON_ACCENT, palette};
