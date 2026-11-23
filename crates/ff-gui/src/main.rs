@@ -1094,6 +1094,10 @@ impl App {
                 self.act(Action::SelectAll, 0);
                 dirty = true;
             }
+            // Files' own icons read in the background came in.
+            if self.icons.take_loaded() {
+                dirty = true;
+            }
             // A delete running in the background finished.
             if self.deleting.is_some() && self.finish_delete(false) {
                 dirty = true;
@@ -1114,7 +1118,7 @@ impl App {
             // While idle, wake once a second to notice a refreshed index.
             // While indexing, wake often to move the progress along.
             // Hidden (Linux), wake often to answer another start quickly.
-            let idle = if self.building.is_some() || self.deleting.is_some() || (self.hidden && cfg!(unix)) {
+            let idle = if self.building.is_some() || self.deleting.is_some() || self.icons.loading() || (self.hidden && cfg!(unix)) {
                 Duration::from_millis(150)
             } else {
                 Duration::from_secs(1)
@@ -2700,10 +2704,12 @@ impl App {
         self.marks.iter().copied().filter(|&r| r < self.hits.len()).collect()
     }
 
-    /// For a whole drive (a root such as C:\), its path: drives get their
-    /// own icons.
-    fn drive_path(&self, id: u32) -> Option<PathBuf> {
-        self.index.parent(id).is_none().then(|| self.index.path(id)).filter(|p| p.parent().is_none())
+    /// An entry's path, and whether it is a whole drive (a root such as
+    /// C:\ or /): for its icon.
+    fn entry_path(&self, id: u32) -> (PathBuf, bool) {
+        let path = self.index.path(id);
+        let drive = self.index.parent(id).is_none() && path.parent().is_none();
+        (path, drive)
     }
 
     /// The selected rows' index entries and paths.
@@ -3322,10 +3328,10 @@ impl App {
                     }
                     None => String::new(),
                 };
-                let drive = self.drive_path(id);
+                let (entry_path, drive) = self.entry_path(id);
                 let system = self.flag(Flag::SystemIcons);
                 let entry_name = self.index.name(id);
-                self.icons.draw_entry(&mut self.cv, cols[0].0 + pad, y + (row_h - icon) / 2, entry_name, is_dir, self.index.is_symlink(id), drive.as_deref(), system);
+                self.icons.draw_entry(&mut self.cv, cols[0].0 + pad, y + (row_h - icon) / 2, entry_name, is_dir, self.index.is_symlink(id), &entry_path, drive, system);
                 let ty = y + 3 * u;
                 let name_x = cols[0].0 + pad + icon + 6 * u;
                 self.text.draw(&mut self.cv, name_x, ty, &name, cols[0].0 + cols[0].1 - pad - name_x, fg);

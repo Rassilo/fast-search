@@ -694,6 +694,14 @@ pub struct Icons {
     /// the shell has none.
     #[cfg(windows)]
     system: HashMap<String, Option<Vec<[u8; 4]>>>,
+    /// Windows: icons of files that carry their own (programs, shortcuts),
+    /// by path, read in the background; asked for but not in yet: absent.
+    #[cfg(windows)]
+    own: HashMap<std::path::PathBuf, Option<Vec<[u8; 4]>>>,
+    #[cfg(windows)]
+    asked: std::collections::HashSet<std::path::PathBuf>,
+    #[cfg(windows)]
+    loader: Option<crate::shell_icons::Loader>,
 }
 
 impl Icons {
@@ -703,46 +711,98 @@ impl Icons {
             cache: HashMap::new(),
             #[cfg(windows)]
             system: HashMap::new(),
+            #[cfg(windows)]
+            own: HashMap::new(),
+            #[cfg(windows)]
+            asked: Default::default(),
+            #[cfg(windows)]
+            loader: None,
         }
     }
 
     pub fn draw(&mut self, cv: &mut Canvas, x: i32, y: i32, icon: Icon) {
         let size = self.size;
         let image = self.cache.entry(icon).or_insert_with(|| icon.render(size));
-        for (i, p) in image.iter().enumerate() {
-            cv.blend(x + (i % size) as i32, y + (i / size) as i32, [p[0], p[1], p[2]], p[3] as u32);
-        }
+        blit(cv, x, y, size, image);
     }
 
-    /// Draws the icon of an index entry: on Windows with `system`, the one
-    /// Explorer shows (by file type; for a drive, `drive` names it), else
-    /// the built-in one.
+    /// Takes in the files' own icons read since the last call; true if
+    /// any came (the window should be drawn again).
+    pub fn take_loaded(&mut self) -> bool {
+        #[cfg(windows)]
+        if let Some(loader) = &self.loader {
+            let ready = loader.ready();
+            let any = !ready.is_empty();
+            self.own.extend(ready);
+            return any;
+        }
+        false
+    }
+
+    /// True while files' own icons are still being read.
+    pub fn loading(&self) -> bool {
+        #[cfg(windows)]
+        return self.asked.len() > self.own.len();
+        #[cfg(not(windows))]
+        false
+    }
+
+    /// Draws the icon of index entry `path`: on Windows with `system`, the
+    /// one Explorer shows (by file type; a drive's or a program's own),
+    /// else the built-in one.
     #[cfg_attr(not(windows), allow(unused_variables))]
-    pub fn draw_entry(&mut self, cv: &mut Canvas, x: i32, y: i32, name: &[u8], is_dir: bool, is_symlink: bool, drive: Option<&std::path::Path>, system: bool) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_entry(
+        &mut self,
+        cv: &mut Canvas,
+        x: i32,
+        y: i32,
+        name: &[u8],
+        is_dir: bool,
+        is_symlink: bool,
+        path: &std::path::Path,
+        drive: bool,
+        system: bool,
+    ) {
         #[cfg(windows)]
         if system {
-            // A stand-in name of the same type is all the shell needs.
-            let (key, query) = match drive {
-                Some(path) => (path.display().to_string(), String::new()),
-                None if is_dir => ("<folder>".to_string(), "folder".to_string()),
-                None => {
-                    let ext = match name.iter().rposition(|&b| b == b'.') {
-                        Some(i) if i > 0 => String::from_utf8_lossy(&name[i..]).to_ascii_lowercase(),
-                        _ => String::new(),
-                    };
-                    (ext.clone(), format!("file{ext}"))
-                }
-            };
             let size = self.size;
-            let image = self.system.entry(key).or_insert_with(|| crate::shell_icons::icon(&query, is_dir, drive, size));
-            if let Some(image) = image {
-                for (i, p) in image.iter().enumerate() {
-                    cv.blend(x + (i % size) as i32, y + (i / size) as i32, [p[0], p[1], p[2]], p[3] as u32);
+            // A program or shortcut: its own icon, once read; until then
+            // the icon of its type.
+            if !is_dir && !drive && crate::shell_icons::has_own_icon(name) {
+                if let Some(Some(image)) = self.own.get(path) {
+                    return blit(cv, x, y, size, image);
                 }
-                return;
+                if self.asked.insert(path.to_path_buf()) {
+                    self.loader.get_or_insert_with(crate::shell_icons::Loader::new).request(path.to_path_buf(), size);
+                }
+            }
+            // A stand-in name of the same type is all the shell needs.
+            let (key, query) = if drive {
+                (path.display().to_string(), String::new())
+            } else if is_dir {
+                ("<folder>".to_string(), "folder".to_string())
+            } else {
+                let ext = match name.iter().rposition(|&b| b == b'.') {
+                    Some(i) if i > 0 => String::from_utf8_lossy(&name[i..]).to_ascii_lowercase(),
+                    _ => String::new(),
+                };
+                (ext.clone(), format!("file{ext}"))
+            };
+            let real = drive.then_some(path);
+            let image = self.system.entry(key).or_insert_with(|| crate::shell_icons::icon(&query, is_dir, real, size));
+            if let Some(image) = image {
+                return blit(cv, x, y, size, image);
             }
         }
         self.draw(cv, x, y, Icon::of(name, is_dir, is_symlink));
+    }
+}
+
+/// Draws `size` x `size` BGRA pixels at (`x`, `y`), blending by alpha.
+fn blit(cv: &mut Canvas, x: i32, y: i32, size: usize, image: &[[u8; 4]]) {
+    for (i, p) in image.iter().enumerate() {
+        cv.blend(x + (i % size) as i32, y + (i / size) as i32, [p[0], p[1], p[2]], p[3] as u32);
     }
 }
 

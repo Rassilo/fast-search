@@ -41,6 +41,7 @@ unsafe extern "system" {
 #[link(name = "user32")]
 unsafe extern "system" {
     fn DrawIconEx(dc: HANDLE, x: i32, y: i32, icon: HANDLE, w: i32, h: i32, step: u32, brush: HANDLE, flags: u32) -> i32;
+    fn PrivateExtractIconsW(file: *const u16, index: i32, w: i32, h: i32, icons: *mut HANDLE, ids: *mut u32, count: u32, flags: u32) -> u32;
     fn DestroyIcon(icon: HANDLE) -> i32;
 }
 
@@ -141,5 +142,95 @@ fn render(icon: HANDLE, size: usize) -> Option<Vec<[u8; 4]>> {
                 })
                 .collect(),
         )
+    }
+}
+
+/// File types whose files carry their own icon (a program, a shortcut, an
+/// icon file): theirs must be read from the file itself.
+pub fn has_own_icon(name: &[u8]) -> bool {
+    const OWN: [&str; 9] = ["exe", "lnk", "ico", "url", "cpl", "scr", "msc", "cur", "ani"];
+    let Some(dot) = name.iter().rposition(|&b| b == b'.') else { return false };
+    let ext = &name[dot + 1..];
+    OWN.iter().any(|own| own.as_bytes().eq_ignore_ascii_case(ext))
+}
+
+#[link(name = "ole32")]
+unsafe extern "system" {
+    fn CoInitializeEx(reserved: *mut c_void, model: u32) -> i32;
+}
+
+type Loaded = (std::path::PathBuf, Option<Vec<[u8; 4]>>);
+
+/// Reads files' own icons on a thread of its own, so a slow disk never
+/// holds the window up: ask with `request`, collect with `ready`.
+pub struct Loader {
+    ask: std::sync::mpsc::Sender<(std::path::PathBuf, usize)>,
+    done: std::sync::mpsc::Receiver<Loaded>,
+}
+
+impl Loader {
+    pub fn new() -> Loader {
+        let (ask, asked) = std::sync::mpsc::channel::<(std::path::PathBuf, usize)>();
+        let (send, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // The shell wants COM on the thread that asks it.
+            // SAFETY: once, at the start of this thread.
+            unsafe { CoInitializeEx(std::ptr::null_mut(), 0x2) }; // apartment threaded
+            for (path, size) in asked {
+                let pixels = own_icon(&path, size);
+                if send.send((path, pixels)).is_err() {
+                    break;
+                }
+            }
+        });
+        Loader { ask, done }
+    }
+
+    pub fn request(&self, path: std::path::PathBuf, size: usize) {
+        let _ = self.ask.send((path, size));
+    }
+
+    pub fn ready(&self) -> Vec<Loaded> {
+        self.done.try_iter().collect()
+    }
+}
+
+/// A program's (or icon file's) own icon, read from the file itself at
+/// `size`, as Explorer's best match. Files kept online only (OneDrive) are
+/// left alone: reading them would download them.
+fn file_icon(path: &Path, size: usize) -> Option<Vec<[u8; 4]>> {
+    const FILE_ATTRIBUTE_OFFLINE: u32 = 0x1000;
+    const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x4_0000;
+    const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
+    let attrs = std::os::windows::fs::MetadataExt::file_attributes(&std::fs::metadata(path).ok()?);
+    if attrs & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) != 0 {
+        return None;
+    }
+    let wide = crate::winsys::wide(path.as_os_str());
+    let (mut icon, mut id) = (std::ptr::null_mut(), 0u32);
+    // SAFETY: a NUL-terminated path; room for one icon and its id.
+    let got = unsafe { PrivateExtractIconsW(wide.as_ptr(), 0, size as i32, size as i32, &mut icon, &mut id, 1, 0) };
+    if got == 0 || got == u32::MAX || icon.is_null() {
+        return None;
+    }
+    let pixels = render(icon, size);
+    // SAFETY: the icon just extracted, ours to destroy.
+    unsafe { DestroyIcon(icon) };
+    pixels
+}
+
+/// A file's own icon, as the shell gives it (tried twice: its first answer
+/// on a new thread is sometimes empty). When that is only Windows'
+/// generic program icon, the icon is read from the file itself.
+fn own_icon(path: &Path, size: usize) -> Option<Vec<[u8; 4]>> {
+    let shell = icon("", false, Some(path), size).or_else(|| icon("", false, Some(path), size));
+    let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if !matches!(ext.as_str(), "exe" | "ico" | "cpl" | "scr" | "cur" | "ani") {
+        return shell;
+    }
+    let generic = icon(&format!("file.{ext}"), false, None, size);
+    match shell {
+        Some(pixels) if Some(&pixels) != generic.as_ref() => Some(pixels),
+        shell => file_icon(path, size).or(shell),
     }
 }

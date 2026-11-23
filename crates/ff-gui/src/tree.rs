@@ -362,9 +362,9 @@ impl App {
             if !tree.kids(id).is_empty() {
                 self.draw_arrow(x + 5 * u, y + row_h / 2, node.open, dim);
             }
-            let (drive, system) = (self.drive_path(id), self.flag(crate::Flag::SystemIcons));
+            let ((entry_path, drive), system) = (self.entry_path(id), self.flag(crate::Flag::SystemIcons));
             let entry_name = self.index.name(id);
-            self.icons.draw_entry(&mut self.cv, name_left, y + (row_h - icon) / 2, entry_name, is_dir, self.index.is_symlink(id), drive.as_deref(), system);
+            self.icons.draw_entry(&mut self.cv, name_left, y + (row_h - icon) / 2, entry_name, is_dir, self.index.is_symlink(id), &entry_path, drive, system);
             let name = String::from_utf8_lossy(self.index.name(id)).into_owned();
             let (name_x, ty) = (name_left + icon + 6 * u, y + 3 * u);
             self.text.draw(&mut self.cv, name_x, ty, &name, cols[0].1 - pad - name_x, fg);
