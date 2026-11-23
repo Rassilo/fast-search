@@ -501,6 +501,36 @@ impl Index {
         hits
     }
 
+    /// True if entry `id` is one `search` would return for `query`.
+    pub fn matches(&self, query: &Query, opts: &SearchOptions, id: u32) -> bool {
+        !self.scan(query, opts.kind, id as usize..id as usize + 1).is_empty()
+    }
+
+    /// Puts `id` into `hits`, sorted as `search` sorts them, at its place:
+    /// for keeping a result list current without searching again.
+    pub fn insert_sorted(&self, hits: &mut Vec<u32>, id: u32, opts: &SearchOptions) {
+        let mut a_path = Vec::new();
+        let mut b_path = Vec::new();
+        let mut cmp = |a: u32, b: u32| -> std::cmp::Ordering {
+            let by = match opts.sort {
+                Sort::None => std::cmp::Ordering::Equal,
+                Sort::Name => lower(self.name(a)).cmp(&lower(self.name(b))),
+                Sort::Path => {
+                    self.write_path(a, &mut a_path);
+                    self.write_path(b, &mut b_path);
+                    a_path.cmp(&b_path)
+                }
+                Sort::Size => self.size(a).cmp(&self.size(b)),
+                Sort::Mtime => self.mtime(a).cmp(&self.mtime(b)),
+            };
+            // Ties in index order, as the stable sort leaves them.
+            let ord = by.then(a.cmp(&b));
+            if opts.reverse { ord.reverse() } else { ord }
+        };
+        let at = hits.partition_point(|&h| cmp(h, id) == std::cmp::Ordering::Less);
+        hits.insert(at, id);
+    }
+
     fn scan(&self, query: &Query, kind: Kind, range: Range<usize>) -> Vec<u32> {
         let mut out = Vec::new();
         let mut path = Vec::new();

@@ -154,6 +154,12 @@ impl Follow {
         if self.apply(index, &changes) || caught { Found::Changed } else { Found::Nothing }
     }
 
+    /// The entries whose size or time changed since the last call (new
+    /// ones are those past the index's length before).
+    pub fn take_touched(&mut self) -> Vec<u32> {
+        self.tracker.as_mut().map(Tracker::take_touched).unwrap_or_default()
+    }
+
     /// True while folders are still being checked for changes made while
     /// nothing watched.
     pub fn catching_up(&self) -> bool {

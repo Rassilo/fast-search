@@ -537,6 +537,11 @@ struct App {
     /// Without the ffd daemon: the window follows changes to the drives
     /// itself.
     follow: Option<follow::Follow>,
+    /// The index changed while the window was hidden: search again when
+    /// it shows.
+    results_stale: bool,
+    /// When the folder sizes view was last redone for followed changes.
+    tree_refreshed: Instant,
     /// That drop was a move, so the files leave the results when it ends.
     drop_moved: bool,
     last_click: (u32, usize),
@@ -918,6 +923,8 @@ impl App {
             pending_ids: Vec::new(),
             deleting: None,
             follow: None,
+            results_stale: false,
+            tree_refreshed: Instant::now(),
             drop_moved: false,
             last_click: (0, usize::MAX),
         };
@@ -1107,6 +1114,7 @@ impl App {
             if self.wake.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
                 self.b.show();
                 self.hidden = false;
+                self.refresh_if_stale();
                 self.act(Action::SelectAll, 0);
                 dirty = true;
             }
@@ -1218,6 +1226,7 @@ impl App {
                 // last search.
                 Event::Shown => {
                     self.hidden = false;
+                    self.refresh_if_stale();
                     self.act(Action::SelectAll, 0);
                     dirty = true;
                 }
@@ -1314,7 +1323,8 @@ impl App {
 
     // ---- state ---------------------------------------------------------
 
-    fn search(&mut self) {
+    /// The search box's query and the list's options, as `search` uses.
+    fn current_query(&self) -> (Query, SearchOptions) {
         let opts = SearchOptions {
             kind: self.kind,
             sort: self.sort,
@@ -1328,7 +1338,11 @@ impl App {
             match_path: self.flag(Flag::MatchPath),
             wildcards_anywhere: !self.flag(Flag::WildcardWholeName),
         };
-        let query = Query::parse_opts(&self.query, &how);
+        (Query::parse_opts(&self.query, &how), opts)
+    }
+
+    fn search(&mut self) {
+        let (query, opts) = self.current_query();
         self.query_error = query.error().map(String::from);
         self.hits = if self.flag(Flag::HideEmpty) && self.query.trim().is_empty() {
             Vec::new() // an empty search box shows an empty list
@@ -1478,6 +1492,7 @@ impl App {
         if self.follow.as_ref().is_none_or(|f| !f.suits(&self.index)) {
             self.follow = Some(follow::Follow::new(&self.index, &self.db));
         }
+        let old_len = self.index.len() as u32;
         let Some(f) = self.follow.as_mut() else { return false };
         let found = f.check(&mut self.index, !self.hidden);
         if std::mem::take(&mut f.lost) {
@@ -1495,22 +1510,63 @@ impl App {
                 true
             }
             follow::Found::Changed => {
-                self.refresh_after_change();
+                let touched = f.take_touched();
+                // Hidden, nobody sees the list: it is searched again when
+                // the window shows.
+                if self.hidden {
+                    self.results_stale = true;
+                    return false;
+                }
+                self.update_results(old_len, &touched);
                 true
             }
         }
     }
 
-    /// Shows the patched index: the search again, keeping the place.
-    fn refresh_after_change(&mut self) {
-        let kept = self.keep_tree();
-        self.restore_tree(kept);
-        let (sel, top) = (self.sel, self.top);
-        let selected = self.hits.get(sel).copied();
-        self.search();
+    /// Searches again if the index changed while the window was hidden.
+    fn refresh_if_stale(&mut self) {
+        if std::mem::take(&mut self.results_stale) {
+            let kept = self.keep_tree();
+            self.restore_tree(kept);
+            self.search();
+        }
+    }
+
+    /// Brings the results up to date with a patched index without
+    /// searching again (which, on millions of entries and with files
+    /// changing several times a second, would keep every core busy): gone
+    /// entries leave the list, and only new entries (from `old_len` on) and
+    /// those whose size or time changed are matched and put in their place.
+    /// The folder sizes view, costlier, is redone at most every few seconds.
+    fn update_results(&mut self, old_len: u32, touched: &[u32]) {
+        if self.tree.is_some() && self.tree_refreshed.elapsed() >= Duration::from_secs(5) {
+            self.tree_refreshed = Instant::now();
+            let kept = self.keep_tree();
+            self.restore_tree(kept);
+        }
+        let selected = self.hits.get(self.sel).copied();
+        let before = self.hits.len();
+        let index = &self.index;
+        self.hits.retain(|&h| !index.is_gone(h) && !touched.contains(&h));
+        let mut changed = self.hits.len() != before;
+        if !(self.flag(Flag::HideEmpty) && self.query.trim().is_empty()) {
+            let (query, opts) = self.current_query();
+            let candidates = touched.iter().copied().chain(old_len..self.index.len() as u32);
+            for id in candidates {
+                if !self.index.is_gone(id) && self.index.matches(&query, &opts, id) {
+                    self.index.insert_sorted(&mut self.hits, id, &opts);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            // Rows moved: extra selected rows no longer mean the same.
+            self.marks.clear();
+            self.hover_row = None;
+        }
         // Keep the same entry selected when it is still there.
-        self.sel = selected.and_then(|id| self.hits.iter().position(|&h| h == id)).unwrap_or(sel).min(self.hits.len().saturating_sub(1));
-        self.top = top.min(self.max_top());
+        self.sel = selected.and_then(|id| self.hits.iter().position(|&h| h == id)).unwrap_or(self.sel).min(self.hits.len().saturating_sub(1));
+        self.top = self.top.min(self.max_top());
     }
 
     /// Writes the followed changes to the index file.

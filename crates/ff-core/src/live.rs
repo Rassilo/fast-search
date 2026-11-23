@@ -25,6 +25,9 @@ pub struct Tracker {
     /// Removed entries are marked gone in place, keeping every id valid
     /// (for a window showing them), instead of being dropped.
     tombstones: bool,
+    /// Entries whose size or time changed since [`Tracker::take_touched`]
+    /// (new ones are those past the index's old length).
+    touched: Vec<u32>,
 }
 
 const FNV_START: u64 = 0xcbf2_9ce4_8422_2325;
@@ -56,7 +59,7 @@ impl Tracker {
     }
 
     fn build(index: &Index, fixed_roots: Vec<Vec<u8>>, tombstones: bool) -> Tracker {
-        let mut t = Tracker { dirs: HashMap::new(), fixed_roots, tombstones };
+        let mut t = Tracker { dirs: HashMap::new(), fixed_roots, tombstones, touched: Vec::new() };
         t.rebuild(index);
         t
     }
@@ -88,6 +91,11 @@ impl Tracker {
             self.dirs.insert(h, id as u32);
         }
         self.dirs.shrink_to_fit();
+    }
+
+    /// The entries whose size or time changed since the last call.
+    pub fn take_touched(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.touched)
     }
 
     /// The indexed directory at `path`, if any.
@@ -160,7 +168,12 @@ impl Tracker {
                 // Still there, same kind: refresh size and time in place.
                 (Some(md), Some(id)) if flags == Some(index.flags[id as usize]) => {
                     let i = id as usize;
-                    changed |= (index.size[i], index.mtime[i]) != (crate::os::size(&md), crate::os::mtime(&md));
+                    if (index.size[i], index.mtime[i]) != (crate::os::size(&md), crate::os::mtime(&md)) {
+                        changed = true;
+                        if self.tombstones {
+                            self.touched.push(id);
+                        }
+                    }
                     index.set_meta(id, crate::os::size(&md), crate::os::mtime(&md));
                 }
                 (md, old) => {
