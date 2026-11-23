@@ -320,6 +320,14 @@ const TEXTS: &[(&str, [&str; 3])] = &[
     ("% of parent", ["% du parent", "% del padre", "% del genitore"]),
     ("% of disk", ["% du disque", "% del disco", "% del disco"]),
     ("Free", ["Libre", "Libre", "Libero"]),
+    (
+        "Some folders cannot be followed; changes there show after the next indexing",
+        [
+            "Certains dossiers ne peuvent pas être suivis ; leurs changements apparaîtront après la prochaine indexation",
+            "Algunas carpetas no se pueden seguir; sus cambios aparecerán tras la próxima indexación",
+            "Alcune cartelle non possono essere seguite; le modifiche lì appariranno dopo la prossima indicizzazione",
+        ],
+    ),
     ("File icons from the system (as its file manager shows them)", ["Icônes de fichiers du système (comme son gestionnaire de fichiers)", "Iconos de archivo del sistema (como su gestor de archivos)", "Icone dei file del sistema (come il suo gestore di file)"]),
     ("{} files", ["{} fichiers", "{} archivos", "{} file"]),
     ("Esc: back to the search", ["Échap : retour à la recherche", "Esc: volver a la búsqueda", "Esc: torna alla ricerca"]),

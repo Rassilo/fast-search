@@ -394,8 +394,15 @@ and choose a font file with `FF_GUI_FONT=/path/to/font.ttf`.
 
 ## Live updates: the `ffd` daemon
 
-Without the daemon, the index is a snapshot: it is as fresh as your last
-`ff index`. With it, the index follows the disk.
+Without the daemon, the window follows the disk by itself while it runs
+(which, kept in the notification area, is from sign-in): it watches the
+indexed drives (`ReadDirectoryChangesW` on Windows, inotify on Linux)
+and patches its index in place, so new, renamed and deleted files show
+within a moment. It writes the index file back once changes stop for
+30 seconds while it is hidden (at most hourly while files keep changing,
+since the file is large) and when it quits; `ff` on the command line
+reads that file. With the daemon, the index file itself follows the
+disk, for every user and with no window running.
 
 ```
             root                              your user
@@ -630,7 +637,10 @@ and the checklist before a release are in
 - On Wayland, typing accents with dead keys or Compose is not supported
   yet, and a compositor without title bars of its own (GNOME) always gets
   the built-in title bar.
-- Without the daemon, changes are only picked up by `ff index` or F5.
+- Without the daemon and with no window running, changes are only picked
+  up by `ff index` or F5. On Linux the window needs one inotify watch per
+  folder; past the system's limit (`fs.inotify.max_user_watches`) some
+  folders are not followed, and the window says so.
 - Files on a drive read directly (not mounted) can be found, not opened.
 - Regular expressions use a compact engine: `\d`, `\w` and `\s` are
   ASCII-only.

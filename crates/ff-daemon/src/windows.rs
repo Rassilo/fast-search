@@ -7,15 +7,13 @@
 //! `ffd` service (or by `ffd` running in a console).
 
 use std::collections::HashSet;
-use std::ffi::{OsString, c_void};
+use std::ffi::c_void;
 use std::fs;
 use std::io::{self, Write};
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock, mpsc};
-use std::thread::JoinHandle;
+use std::sync::{OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use ff_core::live::LiveIndex;
@@ -121,15 +119,7 @@ fn log(msg: impl AsRef<str>) {
     }
 }
 
-enum Msg {
-    /// Something changed about entry `name` in directory `dir`.
-    Changed(Vec<u8>, Vec<u8>),
-    /// Windows dropped events for a root; only a full rescan is safe.
-    Overflow,
-    /// A root's watcher failed and stopped; it is started again (with a
-    /// rescan) after a pause, so a lasting failure does not spin.
-    Lost,
-}
+use ff_core::watch::{Event as Msg, Watcher};
 
 /// How long to wait before restarting a watcher that failed.
 const RETRY_LOST: Duration = Duration::from_secs(30);
@@ -280,7 +270,7 @@ fn serve(cfg: &Config, stop: &AtomicBool) -> Result<(), String> {
             old.stop();
         }
         for root in roots {
-            match Watcher::start(root.clone(), tx.clone()) {
+            match Watcher::start(root.clone(), Vec::new(), tx.clone()) {
                 Ok(w) => {
                     log(format!("watching {}", root.display()));
                     watchers.push(w);
@@ -346,6 +336,7 @@ fn serve(cfg: &Config, stop: &AtomicBool) -> Result<(), String> {
                 }
                 Msg::Overflow => overflow = true,
                 Msg::Lost => {
+                    log("a watcher stopped; changes may be missed until it is started again");
                     retry_at.get_or_insert_with(|| Instant::now() + RETRY_LOST);
                 }
             }
@@ -400,207 +391,6 @@ fn publish(cfg: &Config, index: &Index) -> Result<(), String> {
             Err(e) => return Err(format!("{}: {e}", cfg.output.display())),
         }
     }
-}
-
-// --- Watching ---------------------------------------------------------------
-
-type Handle = *mut c_void;
-const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
-
-#[repr(C)]
-struct Overlapped {
-    internal: usize,
-    internal_high: usize,
-    offset: u32,
-    offset_high: u32,
-    event: Handle,
-}
-
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn CreateFileW(name: *const u16, access: u32, share: u32, sa: *mut c_void, disposition: u32, flags: u32, template: Handle) -> Handle;
-    fn CreateEventW(sa: *mut c_void, manual_reset: i32, initial: i32, name: *const u16) -> Handle;
-    fn ReadDirectoryChangesW(
-        dir: Handle,
-        buf: *mut c_void,
-        len: u32,
-        subtree: i32,
-        filter: u32,
-        returned: *mut u32,
-        overlapped: *mut Overlapped,
-        routine: *const c_void,
-    ) -> i32;
-    fn GetOverlappedResultEx(file: Handle, overlapped: *mut Overlapped, n: *mut u32, timeout_ms: u32, alertable: i32) -> i32;
-    fn CancelIoEx(file: Handle, overlapped: *mut Overlapped) -> i32;
-    fn CloseHandle(h: Handle) -> i32;
-}
-
-const FILE_LIST_DIRECTORY: u32 = 0x1;
-const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
-const OPEN_EXISTING: u32 = 3;
-const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
-const NOTIFY_FILTER: u32 = 0x1 /* file name */ | 0x2 /* dir name */ | 0x8 /* size */ | 0x10 /* last write */;
-const WAIT_TIMEOUT: i32 = 258;
-const ERROR_IO_INCOMPLETE: i32 = 996;
-const ERROR_OPERATION_ABORTED: i32 = 995;
-const ERROR_NOTIFY_ENUM_DIR: i32 = 1022;
-const INFINITE: u32 = u32::MAX;
-
-/// One thread following one root.
-struct Watcher {
-    stop: Arc<AtomicBool>,
-    thread: JoinHandle<()>,
-}
-
-/// A handle that is closed when dropped.
-struct Owned(Handle);
-
-// SAFETY: kernel handles may be used from any thread.
-unsafe impl Send for Owned {}
-
-impl Drop for Owned {
-    fn drop(&mut self) {
-        // SAFETY: a handle we opened and nobody else closes.
-        unsafe { CloseHandle(self.0) };
-    }
-}
-
-impl Watcher {
-    fn start(root: PathBuf, tx: mpsc::Sender<Msg>) -> io::Result<Watcher> {
-        let name: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
-        // SAFETY: a NUL-terminated path; the result is checked.
-        let dir = unsafe {
-            CreateFileW(
-                name.as_ptr(),
-                FILE_LIST_DIRECTORY,
-                FILE_SHARE_ALL,
-                std::ptr::null_mut(),
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-                std::ptr::null_mut(),
-            )
-        };
-        if dir == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
-        }
-        let dir = Owned(dir);
-        // SAFETY: an unnamed manual-reset event.
-        let event = unsafe { CreateEventW(std::ptr::null_mut(), 1, 0, std::ptr::null()) };
-        if event.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        let event = Owned(event);
-        let stop = Arc::new(AtomicBool::new(false));
-        let flag = stop.clone();
-        let thread = std::thread::spawn(move || follow(&root, &dir, &event, &flag, &tx));
-        Ok(Watcher { stop, thread })
-    }
-
-    fn stop(self) {
-        self.stop.store(true, Ordering::Relaxed);
-        let _ = self.thread.join();
-    }
-}
-
-/// Reads change notifications for `root` until `stop` is set.
-fn follow(root: &Path, dir: &Owned, event: &Owned, stop: &AtomicBool, tx: &mpsc::Sender<Msg>) {
-    // u32 elements: the buffer must be DWORD-aligned. 64 KiB is the most a
-    // network drive accepts.
-    let mut buf = vec![0u32; 16 * 1024];
-    loop {
-        let mut ov = Overlapped { internal: 0, internal_high: 0, offset: 0, offset_high: 0, event: event.0 };
-        // SAFETY: `buf` and `ov` stay alive until the request completes or
-        // is cancelled and waited for below.
-        let queued = unsafe {
-            ReadDirectoryChangesW(
-                dir.0,
-                buf.as_mut_ptr().cast(),
-                (buf.len() * 4) as u32,
-                1,
-                NOTIFY_FILTER,
-                std::ptr::null_mut(),
-                &mut ov,
-                std::ptr::null(),
-            )
-        };
-        if queued == 0 {
-            log(format!("{}: watching stopped: {}", root.display(), io::Error::last_os_error()));
-            let _ = tx.send(Msg::Lost);
-            return;
-        }
-        let mut n = 0u32;
-        let result = loop {
-            // SAFETY: the request queued above.
-            if unsafe { GetOverlappedResultEx(dir.0, &mut ov, &mut n, 500, 0) } != 0 {
-                break Ok(n);
-            }
-            let err = io::Error::last_os_error();
-            match err.raw_os_error() {
-                Some(WAIT_TIMEOUT | ERROR_IO_INCOMPLETE) if !stop.load(Ordering::Relaxed) => continue,
-                Some(WAIT_TIMEOUT | ERROR_IO_INCOMPLETE) => {
-                    // SAFETY: cancel our request, then wait until Windows no
-                    // longer uses the buffer.
-                    unsafe {
-                        CancelIoEx(dir.0, &mut ov);
-                        GetOverlappedResultEx(dir.0, &mut ov, &mut n, INFINITE, 0);
-                    }
-                    return;
-                }
-                _ => break Err(err),
-            }
-        };
-        let msgs = match result {
-            // Nothing returned: more changed than the buffer could hold.
-            Ok(0) => vec![Msg::Overflow],
-            Ok(n) => {
-                // SAFETY: Windows wrote `n` bytes into `buf`.
-                let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n as usize) };
-                parse_notifications(bytes).into_iter().filter_map(|rel| changed_entry(root, rel)).collect()
-            }
-            Err(e) if e.raw_os_error() == Some(ERROR_NOTIFY_ENUM_DIR) => vec![Msg::Overflow],
-            Err(e) if e.raw_os_error() == Some(ERROR_OPERATION_ABORTED) => return,
-            Err(e) => {
-                log(format!("{}: watching stopped: {e}", root.display()));
-                let _ = tx.send(Msg::Lost);
-                return;
-            }
-        };
-        for msg in msgs {
-            if tx.send(msg).is_err() {
-                return;
-            }
-        }
-        if stop.load(Ordering::Relaxed) {
-            return;
-        }
-    }
-}
-
-/// Decodes the `FILE_NOTIFY_INFORMATION` records of one read: the changed
-/// paths, relative to the watched root. Anything malformed ends the list.
-fn parse_notifications(buf: &[u8]) -> Vec<OsString> {
-    let u32at = |i: usize| buf.get(i..i + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
-    let mut out = Vec::new();
-    let mut at = 0;
-    // Each record: next offset, action, name length in bytes, UTF-16 name.
-    while let (Some(next), Some(len)) = (u32at(at), u32at(at + 8)) {
-        let Some(name) = buf.get(at + 12..at + 12 + len) else { break };
-        let wide: Vec<u16> = name.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        out.push(OsString::from_wide(&wide));
-        if next == 0 {
-            break;
-        }
-        at += next;
-    }
-    out
-}
-
-/// The (directory, name) pair to re-check for a change at `rel` under `root`.
-fn changed_entry(root: &Path, rel: OsString) -> Option<Msg> {
-    let full = root.join(rel);
-    let (dir, name) = (full.parent()?, full.file_name()?);
-    Some(Msg::Changed(ff_core::os::path_bytes(dir).to_vec(), ff_core::os::bytes(name).to_vec()))
 }
 
 // --- Settings and the service -------------------------------------------------
@@ -1012,6 +802,7 @@ mod service {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn settings_round_trip() {
@@ -1027,28 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn decodes_notifications() {
-        let record = |next: u32, action: u32, name: &str| {
-            let wide: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
-            let mut r = next.to_le_bytes().to_vec();
-            r.extend(action.to_le_bytes());
-            r.extend((wide.len() as u32).to_le_bytes());
-            r.extend(wide);
-            r.resize(r.len().next_multiple_of(4), 0);
-            r
-        };
-        let first = record(0, 1, "dir\\new.txt");
-        let mut buf = record(first.len() as u32, 1, "dir\\new.txt");
-        buf.extend(record(0, 4, "Ünïcode ☃.txt"));
-        assert_eq!(parse_notifications(&buf), [OsString::from("dir\\new.txt"), OsString::from("Ünïcode ☃.txt")]);
-        // Truncated input stops cleanly.
-        for cut in 0..buf.len() {
-            assert!(parse_notifications(&buf[..cut]).len() <= 2);
-        }
-        let Some(Msg::Changed(dir, name)) = changed_entry(Path::new(r"C:\"), OsString::from(r"a\b.txt")) else { panic!() };
-        assert_eq!((&dir[..], &name[..]), (&br"C:\a"[..], &b"b.txt"[..]));
-        let Some(Msg::Changed(dir, _)) = changed_entry(Path::new(r"C:\"), OsString::from("top.txt")) else { panic!() };
-        assert_eq!(dir, br"C:\");
+    fn knows_its_own_files() {
         assert!(is_own(Path::new(r"C:\ProgramData\ff"), br"C:\ProgramData", b"FF"));
         assert!(is_own(Path::new(r"C:\ProgramData\ff"), br"C:\ProgramData\ff", b"index.db.tmp1"));
         assert!(!is_own(Path::new(r"C:\ProgramData\ff"), br"C:\ProgramData", b"other"));

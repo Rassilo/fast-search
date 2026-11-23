@@ -32,6 +32,7 @@ pub mod rawfs;
 pub mod sizes;
 pub mod time;
 pub mod update;
+pub mod watch;
 mod walk;
 #[cfg(windows)]
 pub mod win;

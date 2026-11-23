@@ -9,6 +9,7 @@ mod canvas;
 mod complete;
 mod debug;
 mod dialog;
+mod follow;
 #[cfg(windows)]
 mod gdi_text;
 mod i18n;
@@ -533,6 +534,9 @@ struct App {
     pending_ids: Vec<u32>,
     /// A delete running in the background: its result arrives here.
     deleting: Option<mpsc::Receiver<Deleted>>,
+    /// Without the ffd daemon: the window follows changes to the drives
+    /// itself.
+    follow: Option<follow::Follow>,
     /// That drop was a move, so the files leave the results when it ends.
     drop_moved: bool,
     last_click: (u32, usize),
@@ -691,7 +695,13 @@ fn run() -> ExitCode {
     };
     // Mends a shortcut saved wrongly by an earlier version, out of the way.
     std::thread::spawn(settings::repair_shortcut);
-    match App::new(db, follow_default, query.join(" "), hidden).and_then(|mut app| app.run()) {
+    // Changes followed since the index was last written are kept for the
+    // next start.
+    match App::new(db, follow_default, query.join(" "), hidden).and_then(|mut app| {
+        let result = app.run();
+        app.save_followed();
+        result
+    }) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("ff-gui: {e}");
@@ -907,6 +917,7 @@ impl App {
             pending_paths: Vec::new(),
             pending_ids: Vec::new(),
             deleting: None,
+            follow: None,
             drop_moved: false,
             last_click: (0, usize::MAX),
         };
@@ -1107,6 +1118,10 @@ impl App {
             if self.deleting.is_some() && self.finish_delete(false) {
                 dirty = true;
             }
+            // Files changed on the drives (without the daemon).
+            if self.follow_changes() {
+                dirty = true;
+            }
             // A message in the status bar goes away by itself, unless it
             // reports something still going on.
             if self.status != shown.0 {
@@ -1123,8 +1138,12 @@ impl App {
             // While idle, wake once a second to notice a refreshed index.
             // While indexing, wake often to move the progress along.
             // Hidden (Linux), wake often to answer another start quickly.
+            // Shown and following the drives, wake often so changes show
+            // at once.
             let idle = if self.building.is_some() || self.deleting.is_some() || self.icons.loading() || (self.hidden && cfg!(unix)) {
                 Duration::from_millis(150)
+            } else if self.follow.is_some() && !self.hidden {
+                Duration::from_millis(250)
             } else {
                 Duration::from_secs(1)
             };
@@ -1429,12 +1448,82 @@ impl App {
         self.db_stamp = stamp;
         let kept = self.keep_tree();
         self.index = index;
+        if let Some(f) = &mut self.follow {
+            f.replaced();
+        }
         self.restore_tree(kept);
         let (sel, top) = (self.sel, self.top);
         self.search();
         self.sel = sel.min(self.hits.len().saturating_sub(1));
         self.top = top.min(self.max_top());
         true
+    }
+
+    /// Without the daemon, follows changes on the indexed drives and
+    /// patches the index; true if the results changed. The index file is
+    /// written again once quiet while the window is hidden.
+    fn follow_changes(&mut self) -> bool {
+        let wanted = self.db.as_os_str() != ff_core::SYSTEM_DB
+            && std::env::var_os("FF_GUI_SNAPSHOT").is_none()
+            && std::env::var_os("FF_GUI_TEST").is_none()
+            && self.index.len() > 0;
+        if !wanted {
+            self.follow = None;
+            return false;
+        }
+        // While a build runs, events wait: they apply to the new index.
+        if self.building.is_some() {
+            return false;
+        }
+        if self.follow.as_ref().is_none_or(|f| !f.suits(&self.index)) {
+            self.follow = Some(follow::Follow::new(&self.index, &self.db));
+        }
+        let Some(f) = self.follow.as_mut() else { return false };
+        let found = f.check(&mut self.index, !self.hidden);
+        if std::mem::take(&mut f.lost) {
+            self.status = tr("Some folders cannot be followed; changes there show after the next indexing").into();
+        }
+        match found {
+            follow::Found::Nothing => {
+                if self.hidden && f.time_to_save() {
+                    self.save_followed();
+                }
+                false
+            }
+            follow::Found::Rebuild => {
+                let _ = self.reindex();
+                true
+            }
+            follow::Found::Changed => {
+                self.refresh_after_change();
+                true
+            }
+        }
+    }
+
+    /// Shows the patched index: the search again, keeping the place.
+    fn refresh_after_change(&mut self) {
+        let kept = self.keep_tree();
+        self.restore_tree(kept);
+        let (sel, top) = (self.sel, self.top);
+        let selected = self.hits.get(sel).copied();
+        self.search();
+        // Keep the same entry selected when it is still there.
+        self.sel = selected.and_then(|id| self.hits.iter().position(|&h| h == id)).unwrap_or(sel).min(self.hits.len().saturating_sub(1));
+        self.top = top.min(self.max_top());
+    }
+
+    /// Writes the followed changes to the index file.
+    fn save_followed(&mut self) {
+        let Some(f) = self.follow.as_mut().filter(|f| f.unsaved) else { return };
+        f.unsaved = false;
+        let start = Instant::now();
+        let saved = self.index.save(&self.db);
+        debug::log(format!("follow: index saved ({saved:?}) in {:?}", start.elapsed()));
+        if saved.is_ok() {
+            // Our own write: nothing to load again.
+            self.db_stamp = std::fs::metadata(&self.db).and_then(|m| m.modified()).ok();
+        }
     }
 
     fn reindex(&mut self) -> io::Result<()> {
@@ -1484,6 +1573,9 @@ impl App {
                 self.db_stamp = std::fs::metadata(&self.db).and_then(|m| m.modified()).ok();
                 let kept = self.keep_tree();
                 self.index = index;
+                if let Some(f) = &mut self.follow {
+                    f.replaced();
+                }
                 self.restore_tree(kept);
                 self.status = trf("Indexed {} entries in {} s", &[&group_digits(self.index.len() as u64), &format!("{:.1}", took.as_secs_f64())]);
                 if !forgotten.is_empty() {
@@ -2300,10 +2392,16 @@ impl App {
             .filter_map(|p| Some((ff_core::os::path_bytes(p.parent()?).to_vec(), ff_core::os::bytes(p.file_name()?).to_vec())))
             .collect();
         // Checks the disk: an entry only goes if the file really is gone.
+        // It is marked gone in place, so ids held elsewhere stay valid.
         let kept = self.keep_tree();
-        let mut live = ff_core::live::LiveIndex::new(std::mem::take(&mut self.index));
-        live.apply(&changes);
-        self.index = live.into_index();
+        match &mut self.follow {
+            Some(f) => {
+                f.apply(&mut self.index, &changes);
+            }
+            None => {
+                ff_core::live::Tracker::new(&self.index).apply(&mut self.index, &changes);
+            }
+        }
         self.restore_tree(kept);
         let (sel, top) = (self.sel, self.top);
         self.search();
