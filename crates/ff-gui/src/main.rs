@@ -1815,9 +1815,14 @@ impl App {
                 }
                 false
             }
-            follow::Found::Rebuild => {
-                let _ = self.reindex();
-                true
+            follow::Found::Restart => {
+                // New watchers and a catch-up; what the index has unsaved
+                // is still to be written.
+                let unsaved = f.unsaved;
+                let mut fresh = follow::Follow::new(&self.index, &self.db);
+                fresh.unsaved = unsaved;
+                self.follow = Some(fresh);
+                false
             }
             follow::Found::Changed => {
                 let touched = f.take_touched();

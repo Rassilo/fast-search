@@ -38,6 +38,9 @@ pub struct Follow {
     pub unsaved: bool,
     /// A watcher failed or could not cover everything; said once.
     pub lost: bool,
+    /// When a watcher was last found failed: they are started again a
+    /// little later.
+    lost_at: Option<Instant>,
     /// Events were dropped: the index should be built again.
     pub overflow: bool,
 }
@@ -47,8 +50,10 @@ pub enum Found {
     Nothing,
     /// The index changed.
     Changed,
-    /// Events were lost: only rebuilding the index is safe.
-    Rebuild,
+    /// Events were dropped, or a watcher stopped: the watchers start
+    /// again, and a catch-up (folder times) finds what was missed, much
+    /// cheaper than indexing everything again.
+    Restart,
 }
 
 pub fn roots(index: &Index) -> Vec<Vec<u8>> {
@@ -86,6 +91,9 @@ impl Follow {
             last_change: Instant::now(),
             unsaved_since: Instant::now(),
             unsaved: false,
+            // A root that cannot be watched at all is not retried (it would
+            // only fail again, each time with a catch-up).
+            lost_at: None,
             lost,
             overflow: false,
         }
@@ -120,13 +128,19 @@ impl Follow {
                         self.pending.insert((dir, name));
                     }
                 }
-                Event::Overflow => self.overflow = true,
-                Event::Lost => self.lost = true,
+                Event::Overflow => {
+                    crate::debug::log("follow: the system dropped events; catching up");
+                    self.overflow = true;
+                }
+                Event::Lost => {
+                    crate::debug::log("follow: a watcher stopped; it starts again in 30 s");
+                    self.lost = true;
+                    self.lost_at.get_or_insert_with(Instant::now);
+                }
             }
         }
-        if std::mem::take(&mut self.overflow) {
-            self.pending.clear();
-            return Found::Rebuild;
+        if std::mem::take(&mut self.overflow) || self.lost_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(30)) {
+            return Found::Restart;
         }
         let mut caught = false;
         if let Some(c) = &mut self.catch_up {
