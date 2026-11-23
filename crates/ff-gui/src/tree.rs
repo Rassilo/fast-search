@@ -15,7 +15,7 @@ const DISK_OK: u32 = crate::SELECT;
 const DISK_FULL: u32 = crate::canvas::ACCENT_RED;
 
 use crate::backend::{Key, Mods};
-use crate::canvas::{Icon, ON_ACCENT, palette};
+use crate::canvas::{ON_ACCENT, palette};
 use crate::i18n::{tr, trf};
 use crate::keys::*;
 use crate::{Action, App, DIM, LINE, Menu, PANEL, SELECT, TEXT, WHITE};
@@ -362,8 +362,9 @@ impl App {
             if !tree.kids(id).is_empty() {
                 self.draw_arrow(x + 5 * u, y + row_h / 2, node.open, dim);
             }
-            let kind = Icon::of(self.index.name(id), is_dir, self.index.is_symlink(id));
-            self.icons.draw(&mut self.cv, name_left, y + (row_h - icon) / 2, kind);
+            let (drive, system) = (self.drive_path(id), self.flag(crate::Flag::SystemIcons));
+            let entry_name = self.index.name(id);
+            self.icons.draw_entry(&mut self.cv, name_left, y + (row_h - icon) / 2, entry_name, is_dir, self.index.is_symlink(id), drive.as_deref(), system);
             let name = String::from_utf8_lossy(self.index.name(id)).into_owned();
             let (name_x, ty) = (name_left + icon + 6 * u, y + 3 * u);
             self.text.draw(&mut self.cv, name_x, ty, &name, cols[0].1 - pad - name_x, fg);

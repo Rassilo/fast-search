@@ -690,11 +690,20 @@ impl Icon {
 pub struct Icons {
     pub size: usize,
     cache: HashMap<Icon, Vec<[u8; 4]>>,
+    /// Windows: the shell's icons, by file type (or drive); None where
+    /// the shell has none.
+    #[cfg(windows)]
+    system: HashMap<String, Option<Vec<[u8; 4]>>>,
 }
 
 impl Icons {
     pub fn new(size: usize) -> Icons {
-        Icons { size, cache: HashMap::new() }
+        Icons {
+            size,
+            cache: HashMap::new(),
+            #[cfg(windows)]
+            system: HashMap::new(),
+        }
     }
 
     pub fn draw(&mut self, cv: &mut Canvas, x: i32, y: i32, icon: Icon) {
@@ -703,6 +712,37 @@ impl Icons {
         for (i, p) in image.iter().enumerate() {
             cv.blend(x + (i % size) as i32, y + (i / size) as i32, [p[0], p[1], p[2]], p[3] as u32);
         }
+    }
+
+    /// Draws the icon of an index entry: on Windows with `system`, the one
+    /// Explorer shows (by file type; for a drive, `drive` names it), else
+    /// the built-in one.
+    #[cfg_attr(not(windows), allow(unused_variables))]
+    pub fn draw_entry(&mut self, cv: &mut Canvas, x: i32, y: i32, name: &[u8], is_dir: bool, is_symlink: bool, drive: Option<&std::path::Path>, system: bool) {
+        #[cfg(windows)]
+        if system {
+            // A stand-in name of the same type is all the shell needs.
+            let (key, query) = match drive {
+                Some(path) => (path.display().to_string(), String::new()),
+                None if is_dir => ("<folder>".to_string(), "folder".to_string()),
+                None => {
+                    let ext = match name.iter().rposition(|&b| b == b'.') {
+                        Some(i) if i > 0 => String::from_utf8_lossy(&name[i..]).to_ascii_lowercase(),
+                        _ => String::new(),
+                    };
+                    (ext.clone(), format!("file{ext}"))
+                }
+            };
+            let size = self.size;
+            let image = self.system.entry(key).or_insert_with(|| crate::shell_icons::icon(&query, is_dir, drive, size));
+            if let Some(image) = image {
+                for (i, p) in image.iter().enumerate() {
+                    cv.blend(x + (i % size) as i32, y + (i / size) as i32, [p[0], p[1], p[2]], p[3] as u32);
+                }
+                return;
+            }
+        }
+        self.draw(cv, x, y, Icon::of(name, is_dir, is_symlink));
     }
 }
 

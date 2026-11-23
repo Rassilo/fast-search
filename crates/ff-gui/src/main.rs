@@ -17,6 +17,8 @@ mod instance;
 mod keys;
 mod saved;
 mod settings;
+#[cfg(windows)]
+mod shell_icons;
 mod tree;
 #[cfg(not(windows))]
 mod wayland;
@@ -245,12 +247,14 @@ enum Flag {
     MatchPath,
     /// Closing hides the window to the notification area (Windows).
     CloseToTray,
+    /// File icons from Windows (the ones Explorer shows), not ours.
+    SystemIcons,
     /// The map of the selected folder beside the folder sizes tree.
     SizeMap,
 }
 
 /// Each option's name in the settings file and its default.
-const FLAGS: [(&str, bool); 13] = [
+const FLAGS: [(&str, bool); 14] = [
     ("hide_results_when_empty", false),
     ("close_on_open", false),
     ("path_double_click", true),
@@ -263,6 +267,7 @@ const FLAGS: [(&str, bool); 13] = [
     ("wildcards_whole_name", true),
     ("match_path", false),
     ("close_to_tray", true),
+    ("system_icons", true),
     ("show_size_map", true),
 ];
 
@@ -1992,6 +1997,8 @@ impl App {
                     Row::Check("Show row mouseover", Action::Toggle(Flag::RowHover)),
                     Row::Check("Show selected item in status bar", Action::Toggle(Flag::SelectedInStatus)),
                     Row::Check("Show the size map beside the folder sizes", Action::Toggle(Flag::SizeMap)),
+                    #[cfg(windows)]
+                    Row::Check("File icons from Windows", Action::Toggle(Flag::SystemIcons)),
                     Row::Gap,
                     Row::Dim("Size format".into()),
                     Row::Check("Auto (B, KB, MB, GB)", Action::SizeFormat(0)),
@@ -2693,6 +2700,12 @@ impl App {
         self.marks.iter().copied().filter(|&r| r < self.hits.len()).collect()
     }
 
+    /// For a whole drive (a root such as C:\), its path: drives get their
+    /// own icons.
+    fn drive_path(&self, id: u32) -> Option<PathBuf> {
+        self.index.parent(id).is_none().then(|| self.index.path(id)).filter(|p| p.parent().is_none())
+    }
+
     /// The selected rows' index entries and paths.
     fn selected_entries(&self) -> (Vec<u32>, Vec<PathBuf>) {
         self.selected_rows().into_iter().map(|r| (self.hits[r], self.index.path(self.hits[r]))).unzip()
@@ -3309,8 +3322,10 @@ impl App {
                     }
                     None => String::new(),
                 };
-                let kind = Icon::of(self.index.name(id), is_dir, self.index.is_symlink(id));
-                self.icons.draw(&mut self.cv, cols[0].0 + pad, y + (row_h - icon) / 2, kind);
+                let drive = self.drive_path(id);
+                let system = self.flag(Flag::SystemIcons);
+                let entry_name = self.index.name(id);
+                self.icons.draw_entry(&mut self.cv, cols[0].0 + pad, y + (row_h - icon) / 2, entry_name, is_dir, self.index.is_symlink(id), drive.as_deref(), system);
                 let ty = y + 3 * u;
                 let name_x = cols[0].0 + pad + icon + 6 * u;
                 self.text.draw(&mut self.cv, name_x, ty, &name, cols[0].0 + cols[0].1 - pad - name_x, fg);

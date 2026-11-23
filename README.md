@@ -522,7 +522,8 @@ What differs from Linux:
   title bar (Windows keeps the rounded corners, shadow and resize
   borders; *Options → Menus in the title bar* turns it off), text is
   drawn with ClearType in Segoe UI, the accent colour is the desktop's,
-  and it follows the Windows dark mode setting. Results can be dragged
+  it follows the Windows dark mode setting, and file icons are the ones
+  Explorer shows (*Options → View* switches to the built-in ones). Results can be dragged
   to Explorer and copied as files. The global shortcut (default
   Ctrl+Alt+F; set it in *Options → Desktop* by pressing the keys, such as
   Alt+Q) is registered by the running window, so it works while Fast
