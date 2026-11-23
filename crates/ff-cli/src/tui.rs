@@ -670,14 +670,11 @@ fn base64(data: &[u8]) -> String {
     out
 }
 
-/// A bar of `w` cells filled to `fraction`, with eighths at its end.
-fn bar(fraction: f64, w: usize) -> String {
-    let eighths = (fraction.clamp(0.0, 1.0) * (w * 8) as f64).round() as usize;
-    let mut out = "█".repeat(eighths / 8);
-    if eighths % 8 > 0 {
-        out.push([' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉'][eighths % 8]);
-    }
-    pad(&out, w)
+/// How many of `w` cells a bar filled to `fraction` covers. Bars are drawn in
+/// whole cells of `▆`, lower than the row, so bars on rows above each other
+/// keep a gap between them (eighths of a cell would fill the row's height).
+fn bar(fraction: f64, w: usize) -> usize {
+    (fraction.clamp(0.0, 1.0) * w as f64).round() as usize
 }
 
 // ---- the interface --------------------------------------------------------------
@@ -696,7 +693,7 @@ struct Paint {
     accent: &'static str,
     error: &'static str,
     /// Share bars: the filled part, the same for a nearly full disk, and
-    /// the track behind them (a background colour).
+    /// the empty rest of the track (grey).
     bar: &'static str,
     full: &'static str,
     track: &'static str,
@@ -804,7 +801,7 @@ impl Ui {
                 // 256-colour blue, and a red of the same tone, on dark grey.
                 bar: "\x1b[38;5;33m",
                 full: "\x1b[38;5;167m",
-                track: "\x1b[48;5;237m",
+                track: "\x1b[38;5;238m",
             }
         };
         let sort = SORTS.iter().position(|(s, r, _)| *s == start.sort && *r == start.reverse).unwrap_or(0);
@@ -1583,7 +1580,20 @@ impl Ui {
     /// A share as an 8-cell bar on its track, then its figure: 15 cells.
     fn share(&self, share: Option<f64>, colour: &str, base: &str) -> String {
         let Some(share) = share else { return " ".repeat(15) };
-        format!("{}{colour}{}{base} {:>5.1}%", self.paint.track, bar(share, 8), share * 100.0)
+        let filled = bar(share, 8);
+        // Without colours the track is left blank; with them it is the same
+        // glyph in grey, so the bar reads as a gauge.
+        let track = if self.paint.track.is_empty() { " " } else { "▆" };
+        // Reverse video (the selected row) would swap glyph and cell, and
+        // draw the gap instead of the bar: the bar itself is never reversed.
+        let unreverse = if self.paint.track.is_empty() { "" } else { "\x1b[27m" };
+        format!(
+            "{unreverse}{colour}{}{}{}{base} {:>5.1}%",
+            "▆".repeat(filled),
+            self.paint.track,
+            track.repeat(8 - filled),
+            share * 100.0
+        )
     }
 
     /// The capacity and free space of the drive `id` is on, if known.
@@ -1864,7 +1874,8 @@ mod tests {
     fn helpers() {
         assert_eq!(base64(b"/tmp/a b"), "L3RtcC9hIGI=");
         assert_eq!(base64(b"ab"), "YWI=");
-        assert_eq!(bar(0.5, 4), "██  ");
-        assert_eq!(bar(1.0, 2), "██");
+        assert_eq!(bar(0.5, 4), 2);
+        assert_eq!(bar(1.0, 2), 2);
+        assert_eq!(bar(1.5, 8), 8);
     }
 }
