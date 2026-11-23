@@ -585,3 +585,19 @@ fn tracker_timing() {
     eprintln!("catch-up: {stale} folders changed, index changed: {changed}, {:?} ({refresh_time:?} refreshing)", t.elapsed());
 }
 
+
+/// Times searches on a real index (FF_DB), as typed in the window.
+#[cfg(test)]
+#[test]
+#[ignore]
+fn search_timing() {
+    use crate::{Query, SearchOptions, Sort};
+    let index = Index::load(std::env::var("FF_DB").unwrap()).unwrap();
+    for sort in [Sort::None, Sort::Size, Sort::Name, Sort::Path] {
+        for q in ["", "t", "te", "tes", "test", "test_log"] {
+            let t = std::time::Instant::now();
+            let n = index.search(&Query::parse(q), &SearchOptions { sort, ..Default::default() }).len();
+            eprintln!("{} {q:>9}: {n:>8} hits in {:?}", sort as u8, t.elapsed());
+        }
+    }
+}

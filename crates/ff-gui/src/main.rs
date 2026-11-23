@@ -45,7 +45,7 @@ use std::io;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -578,6 +578,36 @@ struct App {
     /// Something every window shows changed (theme, scale, language, a
     /// new index): all are drawn again.
     redraw_all: bool,
+    /// The search running in the background, if any, and searches given
+    /// up on (a later key made them useless) that are still finishing.
+    search_job: Option<SearchJob>,
+    dropped_searches: Vec<(Arc<AtomicBool>, std::thread::JoinHandle<()>)>,
+    /// The current window's results are out of date: a search waits.
+    search_pending: bool,
+}
+
+/// A search on a thread of its own, so typing never waits for one: the
+/// window keeps showing the last results until these arrive.
+struct SearchJob {
+    window: u8,
+    stop: Arc<AtomicBool>,
+    rx: mpsc::Receiver<Option<Vec<u32>>>,
+    handle: std::thread::JoinHandle<()>,
+}
+
+/// The index, lent to a search thread. Sound because the index is never
+/// changed, replaced or dropped while a search thread runs: every change
+/// first stops them all (`App::quiesce`), and `App` stops them when it
+/// is dropped.
+struct IndexRef(*const Index);
+
+// SAFETY: see above; the index is only read through it.
+unsafe impl Send for IndexRef {}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        self.quiesce();
+    }
 }
 
 /// Declares the state each search window has of its own: `Session`
@@ -639,6 +669,7 @@ per_window! {
     tile_hover: Option<u32>,
     complete: Option<complete::Complete>,
     pending_draw: bool,
+    search_pending: bool,
 }
 
 fn main() -> ExitCode {
@@ -1002,6 +1033,9 @@ impl App {
             current: 0,
             pending_draw: false,
             redraw_all: false,
+            search_job: None,
+            dropped_searches: Vec::new(),
+            search_pending: false,
             drop_moved: false,
             last_click: (0, usize::MAX),
         };
@@ -1214,6 +1248,12 @@ impl App {
             if self.deleting.is_some() && self.finish_delete(false) {
                 dirty = true;
             }
+            // Results of a background search came in; searches that had to
+            // wait start.
+            if self.finish_search(false) {
+                dirty = true;
+            }
+            self.resume_searches();
             // Files changed on the drives (without the daemon).
             if self.follow_changes() {
                 dirty = true;
@@ -1241,7 +1281,9 @@ impl App {
             // Hidden (Linux), wake often to answer another start quickly.
             // Shown and following the drives, wake often so changes show
             // at once; also while catching up, to keep the checks fed.
-            let idle = if self.building.is_some() || self.deleting.is_some() || self.icons.loading() || (self.hidden && cfg!(unix)) {
+            let idle = if self.searching() {
+                Duration::from_millis(10) // results show as soon as they are in
+            } else if self.building.is_some() || self.deleting.is_some() || self.icons.loading() || (self.hidden && cfg!(unix)) {
                 Duration::from_millis(150)
             } else if self.follow.as_ref().is_some_and(|f| !self.hidden || f.catching_up()) {
                 Duration::from_millis(250)
@@ -1460,19 +1502,132 @@ impl App {
         (Query::parse_opts(&self.query, &how), opts)
     }
 
+    /// Searches the index for the current window's query, on a thread of
+    /// its own: the window keeps working with its last results until the
+    /// new ones arrive (`finish_search`). A search still running is given
+    /// up: its results would be out of date.
     fn search(&mut self) {
         let (query, opts) = self.current_query();
         self.query_error = query.error().map(String::from);
-        self.hits = if self.flag(Flag::HideEmpty) && self.query.trim().is_empty() {
-            Vec::new() // an empty search box shows an empty list
-        } else {
-            self.index.search(&query, &opts)
-        };
+        self.search_pending = false;
+        self.drop_search();
+        if self.flag(Flag::HideEmpty) && self.query.trim().is_empty() {
+            self.show_results(Vec::new()); // an empty search box shows an empty list
+            return;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        let (index, flag) = (IndexRef(&self.index), stop.clone());
+        let handle = std::thread::spawn(move || {
+            let index = index;
+            // SAFETY: see `IndexRef`.
+            let index = unsafe { &*index.0 };
+            let _ = tx.send(index.search_until(&query, &opts, &flag));
+        });
+        self.search_job = Some(SearchJob { window: self.current, stop, rx, handle });
+        // Tests take pictures at once: they wait for the results.
+        if std::env::var_os("FF_GUI_TEST").is_some() || std::env::var_os("FF_GUI_SNAPSHOT").is_some() {
+            self.finish_search(true);
+        }
+    }
+
+    /// New results for the current window, from the top.
+    fn show_results(&mut self, hits: Vec<u32>) {
+        self.hits = hits;
         self.hover_row = None;
         self.sel = 0;
         self.top = 0;
         self.marks.clear();
         self.anchor_row = 0;
+    }
+
+    /// Gives up the running search, if any, without waiting for its thread.
+    /// A search for another window is done again later.
+    fn drop_search(&mut self) {
+        if let Some(job) = self.search_job.take() {
+            job.stop.store(true, Ordering::Relaxed);
+            self.dropped_searches.push((job.stop, job.handle));
+            if job.window != self.current {
+                if let Some(Some(w)) = self.windows.get_mut(job.window as usize) {
+                    w.search_pending = true;
+                }
+            }
+        }
+        self.dropped_searches.retain(|(_, h)| !h.is_finished());
+    }
+
+    /// Takes in the results of the background search if they are there
+    /// (`wait`: waits for them). True if a window got new results.
+    fn finish_search(&mut self, wait: bool) -> bool {
+        let Some(job) = &self.search_job else { return false };
+        let result = if wait {
+            job.rx.recv().ok().flatten()
+        } else {
+            match job.rx.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => return false,
+                Err(mpsc::TryRecvError::Disconnected) => None,
+            }
+        };
+        let Some(job) = self.search_job.take() else { return false };
+        let _ = job.handle.join();
+        let Some(hits) = result else { return false };
+        let current = self.current;
+        let open = job.window == current || self.windows.get(job.window as usize).is_some_and(Option::is_some);
+        if !open {
+            return false; // its window was closed meanwhile
+        }
+        self.switch_to(job.window);
+        self.show_results(hits);
+        if job.window != current {
+            if !(self.current == 0 && self.hidden) {
+                let _ = self.render();
+            }
+            self.switch_to(current);
+            return false;
+        }
+        true
+    }
+
+    /// True while a search runs in the background.
+    fn searching(&self) -> bool {
+        self.search_job.is_some()
+    }
+
+    /// Stops every search thread and waits for them: the index is about
+    /// to change. The window whose search stopped searches again after.
+    fn quiesce(&mut self) {
+        if let Some(job) = self.search_job.take() {
+            job.stop.store(true, Ordering::Relaxed);
+            let _ = job.handle.join();
+            if job.window == self.current {
+                self.search_pending = true;
+            } else if let Some(Some(w)) = self.windows.get_mut(job.window as usize) {
+                w.search_pending = true;
+            }
+        }
+        for (stop, handle) in self.dropped_searches.drain(..) {
+            stop.store(true, Ordering::Relaxed);
+            let _ = handle.join();
+        }
+    }
+
+    /// Starts a search that had to wait (one at a time): the current
+    /// window's first. True if one started.
+    fn resume_searches(&mut self) -> bool {
+        if self.searching() {
+            return false;
+        }
+        if self.search_pending {
+            self.search();
+            return true;
+        }
+        let Some(n) = (0..self.windows.len()).find(|&n| self.windows[n].as_ref().is_some_and(|w| w.search_pending)) else { return false };
+        let current = self.current;
+        self.switch_to(n as u8);
+        self.search();
+        self.switch_to(current);
+        true
     }
 
     // ---- search box editing -------------------------------------------
@@ -1580,6 +1735,7 @@ impl App {
         let Ok(index) = Index::load(&self.db) else { return false }; // mid-rewrite: retry next tick
         self.db_stamp = stamp;
         let kept = self.keep_tree();
+        self.quiesce();
         self.index = index;
         if let Some(f) = &mut self.follow {
             f.replaced();
@@ -1605,8 +1761,9 @@ impl App {
             self.follow = None;
             return false;
         }
-        // While a build runs, events wait: they apply to the new index.
-        if self.building.is_some() {
+        // While a build or a search runs, events wait: they apply to the
+        // new index, or once the search is done.
+        if self.building.is_some() || self.searching() {
             return false;
         }
         if self.follow.as_ref().is_none_or(|f| !f.suits(&self.index)) {
@@ -1753,6 +1910,7 @@ impl App {
             Ok(Ok(index)) => {
                 self.db_stamp = std::fs::metadata(&self.db).and_then(|m| m.modified()).ok();
                 let kept = self.keep_tree();
+                self.quiesce();
                 self.index = index;
                 if let Some(f) = &mut self.follow {
                     f.replaced();
@@ -2544,6 +2702,7 @@ impl App {
                 tree.remove(&self.index, id);
             }
         }
+        self.quiesce();
         self.index.remove(&gone);
         if let Some(build) = &mut self.building {
             build.forgotten.extend(done.paths.iter().filter(|p| std::fs::symlink_metadata(p).is_err()).cloned());
@@ -2576,6 +2735,7 @@ impl App {
         // Checks the disk: an entry only goes if the file really is gone.
         // It is marked gone in place, so ids held elsewhere stay valid.
         let kept = self.keep_tree();
+        self.quiesce();
         match &mut self.follow {
             Some(f) => {
                 f.apply(&mut self.index, &changes);
@@ -2891,6 +3051,7 @@ impl App {
             tile_hover: None,
             complete: None,
             pending_draw: true,
+            search_pending: false,
         }
     }
 

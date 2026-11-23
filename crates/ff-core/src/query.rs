@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use crate::index::Index;
@@ -459,38 +460,53 @@ impl Filter {
 impl Index {
     /// Returns the ids of all entries matching `query`.
     pub fn search(&self, query: &Query, opts: &SearchOptions) -> Vec<u32> {
+        self.search_until(query, opts, &AtomicBool::new(false)).unwrap_or_default()
+    }
+
+    /// As `search`, but gives up (None) soon after `stop` is set: a window
+    /// searching as the user types drops a search the next key made
+    /// useless.
+    pub fn search_until(&self, query: &Query, opts: &SearchOptions, stop: &AtomicBool) -> Option<Vec<u32>> {
         let n = self.len();
-        let threads = match opts.threads {
+        let cores = match opts.threads {
             0 => thread::available_parallelism().map_or(4, |n| n.get()),
             t => t,
-        }
-        .min(n / 32_768 + 1);
+        };
+        let threads = cores.min(n / 32_768 + 1);
 
         let mut hits: Vec<u32> = if threads <= 1 {
-            self.scan(query, opts.kind, 0..n)
+            self.scan(query, opts.kind, 0..n, stop)
         } else {
             thread::scope(|s| {
                 let handles: Vec<_> = (0..threads)
                     .map(|t| {
                         let range = n * t / threads..n * (t + 1) / threads;
-                        s.spawn(move || self.scan(query, opts.kind, range))
+                        s.spawn(move || self.scan(query, opts.kind, range, stop))
                     })
                     .collect();
                 // Joining in spawn order keeps results in index order.
                 handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
             })
         };
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
 
-        match opts.sort {
-            Sort::None => {}
-            Sort::Name => hits.sort_by_cached_key(|&i| lower(self.name(i))),
-            Sort::Path => hits.sort_by_cached_key(|&i| {
+        // Sorting is by (key, id): ties keep index order, as a stable
+        // sort would, and every core takes a part.
+        let done = match opts.sort {
+            Sort::None => true,
+            Sort::Name => par_sort(&mut hits, cores, stop, |i| lower(self.name(i))),
+            Sort::Path => par_sort(&mut hits, cores, stop, |i| {
                 let mut buf = Vec::new();
                 self.write_path(i, &mut buf);
                 buf
             }),
-            Sort::Size => hits.sort_by_key(|&i| self.size(i)),
-            Sort::Mtime => hits.sort_by_key(|&i| self.mtime(i)),
+            Sort::Size => par_sort(&mut hits, cores, stop, |i| self.size(i)),
+            Sort::Mtime => par_sort(&mut hits, cores, stop, |i| self.mtime(i)),
+        };
+        if !done {
+            return None;
         }
         if opts.reverse {
             hits.reverse();
@@ -498,12 +514,12 @@ impl Index {
         if opts.limit != 0 {
             hits.truncate(opts.limit);
         }
-        hits
+        Some(hits)
     }
 
     /// True if entry `id` is one `search` would return for `query`.
     pub fn matches(&self, query: &Query, opts: &SearchOptions, id: u32) -> bool {
-        !self.scan(query, opts.kind, id as usize..id as usize + 1).is_empty()
+        !self.scan(query, opts.kind, id as usize..id as usize + 1, &AtomicBool::new(false)).is_empty()
     }
 
     /// Puts `id` into `hits`, sorted as `search` sorts them, at its place:
@@ -531,12 +547,15 @@ impl Index {
         hits.insert(at, id);
     }
 
-    fn scan(&self, query: &Query, kind: Kind, range: Range<usize>) -> Vec<u32> {
+    fn scan(&self, query: &Query, kind: Kind, range: Range<usize>, stop: &AtomicBool) -> Vec<u32> {
         let mut out = Vec::new();
         let mut path = Vec::new();
         let mut scratch = Vec::new();
         let has_path_terms = query.terms.iter().any(|t| t.path);
         for i in range {
+            if i % 65_536 == 0 && stop.load(Ordering::Relaxed) {
+                return out;
+            }
             let id = i as u32;
             if self.flags[i] & crate::index::FLAG_GONE != 0 {
                 continue;
@@ -565,6 +584,65 @@ impl Index {
             out.push(id);
         }
         out
+    }
+}
+
+/// Sorts ids by (key, id) on up to `threads` threads: parts are keyed and
+/// sorted at once, then merged in pairs. False if `stop` was set
+/// meanwhile (the order is then unfinished).
+fn par_sort<K: Ord + Send>(hits: &mut [u32], threads: usize, stop: &AtomicBool, key: impl Fn(u32) -> K + Sync) -> bool {
+    let n = hits.len();
+    let parts = if n < 65_536 { 1 } else { threads.clamp(1, 64) };
+    let size = n.div_ceil(parts).max(1);
+    let key = &key;
+    let mut runs: Vec<Vec<(K, u32)>> = thread::scope(|s| {
+        let handles: Vec<_> = hits
+            .chunks(size)
+            .map(|part| {
+                s.spawn(move || {
+                    let mut run: Vec<(K, u32)> = part.iter().map(|&i| (key(i), i)).collect();
+                    run.sort_unstable();
+                    run
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    while runs.len() > 1 {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        let mut pairs = Vec::new();
+        let mut iter = runs.into_iter();
+        while let Some(a) = iter.next() {
+            pairs.push((a, iter.next()));
+        }
+        runs = thread::scope(|s| {
+            let handles: Vec<_> = pairs.into_iter().map(|(a, b)| s.spawn(move || merge(a, b))).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+    }
+    if let Some(run) = runs.pop() {
+        for (slot, (_, id)) in hits.iter_mut().zip(run) {
+            *slot = id;
+        }
+    }
+    !stop.load(Ordering::Relaxed)
+}
+
+/// Merges two sorted runs into one.
+fn merge<K: Ord>(a: Vec<(K, u32)>, b: Option<Vec<(K, u32)>>) -> Vec<(K, u32)> {
+    let Some(b) = b else { return a };
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    let (mut a, mut b) = (a.into_iter().peekable(), b.into_iter().peekable());
+    loop {
+        let take_a = match (a.peek(), b.peek()) {
+            (Some(x), Some(y)) => x <= y,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => return out,
+        };
+        out.push(if take_a { a.next() } else { b.next() }.unwrap());
     }
 }
 
