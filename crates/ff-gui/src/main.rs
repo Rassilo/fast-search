@@ -1634,14 +1634,13 @@ impl App {
                 // Every window's results; a hidden one is searched again
                 // when it shows (nobody sees it meanwhile).
                 let current = self.current;
+                // Every window's results, a hidden one's too: it, or a new
+                // window taking its list, shows at once when called.
                 self.each_window(|app| {
-                    if app.current == 0 && app.hidden {
-                        app.results_stale = true;
-                    } else {
-                        app.update_results(old_len, &touched);
-                        if app.current != current {
-                            let _ = app.render();
-                        }
+                    app.update_results(old_len, &touched);
+                    let shown = !(app.current == 0 && app.hidden);
+                    if shown && app.current != current {
+                        let _ = app.render();
                     }
                 });
                 !(self.current == 0 && self.hidden)
@@ -2895,6 +2894,22 @@ impl App {
         }
     }
 
+    /// The results of an empty search with the options of `blank`, from a
+    /// window that shows exactly that, if one does.
+    fn empty_results(&self, blank: &Session) -> Option<Vec<u32>> {
+        let same = |query: &str, error: &Option<String>, stale: bool, opts: (Kind, CaseMode, bool, bool, Sort, bool)| {
+            query.is_empty() && error.is_none() && !stale && opts == (blank.kind, blank.case, blank.regex, blank.whole_word, blank.sort, blank.reverse)
+        };
+        if same(&self.query, &self.query_error, self.results_stale, (self.kind, self.case, self.regex, self.whole_word, self.sort, self.reverse)) {
+            return Some(self.hits.clone());
+        }
+        self.windows
+            .iter()
+            .flatten()
+            .find(|w| same(&w.query, &w.query_error, w.results_stale, (w.kind, w.case, w.regex, w.whole_word, w.sort, w.reverse)))
+            .map(|w| w.hits.clone())
+    }
+
     /// Ends the current window's search: it starts again empty (its size
     /// kept).
     fn reset_session(&mut self) {
@@ -2933,9 +2948,19 @@ impl App {
                 if self.windows.len() <= n {
                     self.windows.resize_with(n + 1, || None);
                 }
-                self.windows[n] = Some(self.blank_session());
+                let mut blank = self.blank_session();
+                // An empty search lists millions of entries: take the list
+                // from a window that has it rather than search again, so the
+                // window shows at once.
+                let ready = self.empty_results(&blank);
+                if let Some(hits) = &ready {
+                    blank.hits = hits.clone();
+                }
+                self.windows[n] = Some(blank);
                 self.switch_to(n as u8);
-                self.search();
+                if ready.is_none() {
+                    self.search();
+                }
             }
             // A desktop that cannot open another: a fresh search here.
             Err(_) => {

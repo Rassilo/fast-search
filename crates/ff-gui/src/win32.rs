@@ -903,6 +903,9 @@ pub struct Win32 {
     mains: Vec<HWND>,
     /// The one `select` chose.
     selected: usize,
+    /// Windows opened but not shown yet: they show with their first
+    /// frame, so they never flash white.
+    unshown: Vec<HWND>,
     dialog: HWND,
     class: Vec<u16>,
     instance: HANDLE,
@@ -971,6 +974,7 @@ impl Win32 {
             Ok(Win32 {
                 mains: vec![main],
                 selected: 0,
+                unshown: Vec::new(),
                 dialog: std::ptr::null_mut(),
                 class,
                 instance,
@@ -1099,6 +1103,15 @@ impl Backend for Win32 {
             ReleaseDC(hwnd, dc);
         }
         with(|s| *frame_of(s, win) = Some(frame));
+        // A new window shows once it has something to show.
+        if let Some(i) = self.unshown.iter().position(|&w| w == hwnd) {
+            self.unshown.swap_remove(i);
+            // SAFETY: our window; it paints the frame just kept.
+            unsafe {
+                ShowWindow(hwnd, SW_SHOW);
+                SetForegroundWindow(hwnd);
+            }
+        }
         Ok(())
     }
 
@@ -1166,8 +1179,10 @@ impl Backend for Win32 {
                 self.mains.resize(n + 1, std::ptr::null_mut());
             }
             self.mains[n] = hwnd;
-            ShowWindow(hwnd, SW_SHOW);
-            SetForegroundWindow(hwnd);
+            // Now that the window procedure knows it: our own title bar
+            // (the frame was computed before, as Windows' own).
+            SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0, 0x1 | 0x2 | 0x4 | 0x10 | 0x20); // NOSIZE NOMOVE NOZORDER NOACTIVATE FRAMECHANGED
+            self.unshown.push(hwnd);
             let size = client_size(hwnd);
             with(|s| {
                 if s.sizes.len() <= n {
@@ -1186,6 +1201,7 @@ impl Backend for Win32 {
             return;
         }
         let hwnd = std::mem::replace(&mut self.mains[n], std::ptr::null_mut());
+        self.unshown.retain(|&w| w != hwnd);
         with(|s| {
             s.mains[n] = 0;
             *frame_of(s, Win::Main(n as u8)) = None;
