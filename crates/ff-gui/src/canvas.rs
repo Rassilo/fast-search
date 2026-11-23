@@ -690,10 +690,12 @@ impl Icon {
 pub struct Icons {
     pub size: usize,
     cache: HashMap<Icon, Vec<[u8; 4]>>,
-    /// Windows: the shell's icons, by file type (or drive); None where
-    /// the shell has none.
-    #[cfg(windows)]
+    /// The system's icons, by file type (or drive); None where it has
+    /// none: the Windows shell's, or the desktop's icon theme elsewhere.
     system: HashMap<String, Option<Vec<[u8; 4]>>>,
+    /// Elsewhere: the desktop's icon theme, read on first use.
+    #[cfg(not(windows))]
+    themes: Option<crate::linux_icons::Themes>,
     /// Windows: icons of files that carry their own (programs, shortcuts),
     /// by path, read in the background; asked for but not in yet: absent.
     #[cfg(windows)]
@@ -709,8 +711,9 @@ impl Icons {
         Icons {
             size,
             cache: HashMap::new(),
-            #[cfg(windows)]
             system: HashMap::new(),
+            #[cfg(not(windows))]
+            themes: None,
             #[cfg(windows)]
             own: HashMap::new(),
             #[cfg(windows)]
@@ -793,6 +796,27 @@ impl Icons {
             let image = self.system.entry(key).or_insert_with(|| crate::shell_icons::icon(&query, is_dir, real, size));
             if let Some(image) = image {
                 return blit(cv, x, y, size, image);
+            }
+        }
+        // The desktop's icon theme (Linux and others).
+        #[cfg(not(windows))]
+        if system {
+            let size = self.size;
+            let themes = self.themes.get_or_insert_with(crate::linux_icons::Themes::load);
+            if themes.usable() {
+                let key = if drive {
+                    "<drive>".to_string()
+                } else if is_dir {
+                    "<folder>".to_string()
+                } else {
+                    // The extension decides the type (and so the icon).
+                    let name = String::from_utf8_lossy(name).to_ascii_lowercase();
+                    name.split_once('.').map_or(String::new(), |(_, ext)| ext.to_string())
+                };
+                let image = self.system.entry(key).or_insert_with(|| themes.icon(name, is_dir, drive, size));
+                if let Some(image) = image {
+                    return blit(cv, x, y, size, image);
+                }
             }
         }
         self.draw(cv, x, y, Icon::of(name, is_dir, is_symlink));

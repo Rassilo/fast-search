@@ -367,6 +367,15 @@ or under **Options → Interface**. The accent colour (selection, focus)
 is the desktop's (on Windows, its accent colour) unless you pick one of
 seven at the bottom of the **Theme** menu.
 
+File icons are the ones the system's file manager shows: on Windows
+Explorer's (a program's or shortcut's own, read in the background), on
+Linux the desktop's icon theme (GNOME's or KDE's setting, or
+`FF_ICON_THEME`), found by type from the MIME database. PNG icons are
+decoded directly; SVG ones are converted once with `rsvg-convert` and
+kept in `~/.cache/ff/icons`. Where neither is possible the built-in
+icons are used; *Options → View → File icons from the system* turns this
+off.
+
 One copy runs per user. Closing the window (or Esc on an empty search)
 keeps it running with the index loaded, hidden (on Windows, in the
 notification area; Linux desktops have no common tray), and the global

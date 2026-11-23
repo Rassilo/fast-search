@@ -319,7 +319,7 @@ const TEXTS: &[(&str, [&str; 3])] = &[
     ("Folders", ["Dossiers", "Carpetas", "Cartelle"]),
     ("% of parent", ["% du parent", "% del padre", "% del genitore"]),
     ("% of disk", ["% du disque", "% del disco", "% del disco"]),
-    ("File icons from Windows", ["Icônes de fichiers de Windows", "Iconos de archivo de Windows", "Icone dei file di Windows"]),
+    ("File icons from the system (as its file manager shows them)", ["Icônes de fichiers du système (comme son gestionnaire de fichiers)", "Iconos de archivo del sistema (como su gestor de archivos)", "Icone dei file del sistema (come il suo gestore di file)"]),
     ("{} files", ["{} fichiers", "{} archivos", "{} file"]),
     ("Esc: back to the search", ["Échap : retour à la recherche", "Esc: volver a la búsqueda", "Esc: torna alla ricerca"]),
     ("This folder is empty", ["Ce dossier est vide", "Esta carpeta está vacía", "Questa cartella è vuota"]),

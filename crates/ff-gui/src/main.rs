@@ -15,6 +15,9 @@ mod i18n;
 #[cfg(unix)]
 mod instance;
 mod keys;
+#[cfg(not(windows))]
+mod linux_icons;
+mod png;
 mod saved;
 mod settings;
 #[cfg(windows)]
@@ -247,7 +250,7 @@ enum Flag {
     MatchPath,
     /// Closing hides the window to the notification area (Windows).
     CloseToTray,
-    /// File icons from Windows (the ones Explorer shows), not ours.
+    /// File icons from the system (Explorer's, or the icon theme), not ours.
     SystemIcons,
     /// The map of the selected folder beside the folder sizes tree.
     SizeMap,
@@ -2001,8 +2004,7 @@ impl App {
                     Row::Check("Show row mouseover", Action::Toggle(Flag::RowHover)),
                     Row::Check("Show selected item in status bar", Action::Toggle(Flag::SelectedInStatus)),
                     Row::Check("Show the size map beside the folder sizes", Action::Toggle(Flag::SizeMap)),
-                    #[cfg(windows)]
-                    Row::Check("File icons from Windows", Action::Toggle(Flag::SystemIcons)),
+                    Row::Check("File icons from the system (as its file manager shows them)", Action::Toggle(Flag::SystemIcons)),
                     Row::Gap,
                     Row::Dim("Size format".into()),
                     Row::Check("Auto (B, KB, MB, GB)", Action::SizeFormat(0)),
