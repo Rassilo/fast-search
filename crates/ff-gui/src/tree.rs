@@ -115,20 +115,21 @@ impl App {
         if w < 640 * self.u || !self.flag(crate::Flag::SizeMap) { w } else { (w * 46 / 100).max(380 * self.u) }
     }
 
-    /// (x, width) of the Name, Size, Files, Folders, % of parent, % of disk
-    /// and Modified columns. Narrow trees (beside the map) drop columns
-    /// from the right; % of disk is left out where drive sizes are unknown.
-    fn tree_columns(&mut self) -> [(i32, i32); 7] {
+    /// (x, width) of the Name, Size, Files, Folders, % of parent, % of disk,
+    /// Free and Modified columns. Narrow trees (beside the map) drop
+    /// columns from the right; % of disk and Free are left out where drive
+    /// sizes are unknown.
+    fn tree_columns(&mut self) -> [(i32, i32); 8] {
         let pad = 8 * self.u;
         let count = self.text.width("999.9K").max(self.text.width(tr("Folders"))) + 2 * pad;
         let size = self.text.width("1,023.9 MB") + 2 * pad;
         let share = [tr("% of parent"), tr("% of disk")].iter().map(|h| self.text.width(h)).max().unwrap_or(0).max(84 * self.u) + 2 * pad;
         let date = self.text.width("0000-00-00") + 2 * pad;
         let room = self.tree_split() - self.bar_w();
-        let disk = if self.disks.is_empty() { 0 } else { share };
-        let mut widths = [0, size, count, count, share, disk, date];
+        let (disk, free) = if self.disks.is_empty() { (0, 0) } else { (share, size) };
+        let mut widths = [0, size, count, count, share, disk, free, date];
         // Columns go from the right end while the name keeps 200 units.
-        for i in [6, 5, 3, 2] {
+        for i in [7, 6, 5, 3, 2] {
             if room - widths.iter().sum::<i32>() < 200 * self.u {
                 widths[i] = 0;
             }
@@ -316,13 +317,13 @@ impl App {
         let y = self.box_h();
         self.cv.fill(0, y, split, h - y - row_h, palette::CARD);
         self.cv.fill(pad, y + row_h, split - 2 * pad, 1, LINE);
-        let heads = ["Name", "Size", "Files", "Folders", "% of parent", "% of disk", "Modified"];
+        let heads = ["Name", "Size", "Files", "Folders", "% of parent", "% of disk", "Free", "Modified"];
         for (i, (label, (x, cw))) in heads.into_iter().zip(cols).enumerate().filter(|(_, (_, (_, cw)))| *cw > 0) {
             if i > 0 {
                 self.cv.fill(x, y + 6 * u, 1, row_h - 12 * u, LINE);
             }
             // Numbers are right-aligned, and so are their headings.
-            let lx = if (1..4).contains(&i) { x + cw - pad - self.text.width(tr(label)) } else { x + pad };
+            let lx = if (1..4).contains(&i) || i == 6 { x + cw - pad - self.text.width(tr(label)) } else { x + pad };
             self.text.draw(&mut self.cv, lx, y + 3 * u, tr(label), cw - 2 * pad, DIM);
         }
 
@@ -342,8 +343,9 @@ impl App {
             let share = if of == 0 { 0.0 } else { tree.total(id) as f64 / of as f64 };
             // Its share of its drive. For a whole drive (a root such as C:\
             // or /), how full it is, as the system counts it.
-            let disk = self.disk_of(id).map(|(capacity, free)| {
-                let whole_drive = self.index.parent(id).is_none() && self.index.path(id).parent().is_none();
+            let whole_drive = self.index.parent(id).is_none() && self.index.path(id).parent().is_none();
+            let space = self.disk_of(id);
+            let disk = space.map(|(capacity, free)| {
                 let used = if whole_drive { capacity.saturating_sub(free) } else { tree.total(id) };
                 (used as f64 / capacity as f64).min(1.0)
             });
@@ -385,8 +387,16 @@ impl App {
                 self.draw_share(cols[5], y, disk, color, selected);
             }
             self.cv.clip = (0, right);
+            // The space left on a whole drive (the same for all inside it,
+            // so shown on the drive only).
+            let (fx, fw) = cols[6];
+            if let (true, true, Some((_, free))) = (fw > 0, whole_drive, space) {
+                let cell = units(free);
+                let cell_w = self.text.width(&cell);
+                self.text.draw(&mut self.cv, fx + fw - pad - cell_w, ty, &cell, fw, fg);
+            }
             // When it last changed: for a folder, its newest content.
-            let (dx, dw) = cols[6];
+            let (dx, dw) = cols[7];
             if dw > 0 {
                 let (yr, mo, d, ..) = ff_core::local_civil(tree.newest(id));
                 self.text.draw(&mut self.cv, dx + pad, ty, &format!("{yr:04}-{mo:02}-{d:02}"), dw - pad, dim);

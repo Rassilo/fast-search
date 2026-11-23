@@ -1511,11 +1511,12 @@ impl Ui {
     fn tree_lines(&mut self, body: usize, cols: usize, lines: &mut Vec<String>) {
         // Columns from the right, as the width allows: size; files and
         // folders; the share of the parent and of the disk, each a bar
-        // with its figure.
+        // with its figure; the space left on a drive.
         let (counts, parent, disk) = (cols >= 72, cols >= 56, cols >= 96 && !self.disks.is_empty());
+        let free = disk && cols >= 106;
         // One more for the last column, which stays empty: writing there
         // makes terminals wrap the line.
-        let right = 11 + if counts { 14 } else { 0 } + if parent { 16 } else { 0 } + if disk { 17 } else { 0 };
+        let right = 11 + if counts { 14 } else { 0 } + if parent { 16 } else { 0 } + if disk { 17 } else { 0 } + if free { 10 } else { 0 };
         // A line naming the columns, when there is room for rows below it.
         let header = body > 3;
         let rows = body - header as usize;
@@ -1540,6 +1541,9 @@ impl Ui {
             }
             if disk {
                 line.push_str(&format!("  {:<15}", "% of disk"));
+            }
+            if free {
+                line.push_str(&format!("{:>10}", "Free"));
             }
             lines.push(line);
         }
@@ -1572,6 +1576,11 @@ impl Ui {
                 let colour = if share.is_some_and(|s| s >= 0.9) { self.paint.full } else { self.paint.bar };
                 line.push_str("  ");
                 line.push_str(&self.share(share, colour, base));
+            }
+            if free {
+                // Shown on a whole drive only: inside it, it is the same.
+                let left = self.disk_of(id).filter(|_| self.is_drive(id)).map_or(String::new(), |(_, f)| human_size(f));
+                line.push_str(&format!("{left:>10}"));
             }
             lines.push(line);
         }
