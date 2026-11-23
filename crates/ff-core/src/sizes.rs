@@ -43,6 +43,8 @@ pub struct Tree {
     first: Vec<u32>,
     kids: Vec<u32>,
     roots: Vec<u32>,
+    /// Entries taken out since the tree was built (see `remove`).
+    gone: std::collections::HashSet<u32>,
     pub rows: Vec<Node>,
     pub sel: usize,
     pub top: usize,
@@ -64,7 +66,7 @@ impl Tree {
         let mut folders = vec![0u32; n];
         let mut newest: Vec<i64> = (0..n as u32).map(|id| index.mtime(id)).collect();
         let mut first = vec![0u32; n + 2];
-        for id in 0..n as u32 {
+        for id in (0..n as u32).filter(|&id| !index.is_gone(id)) {
             if let Some(p) = index.parent(id) {
                 first[p as usize + 2] += 1;
             }
@@ -93,7 +95,7 @@ impl Tree {
         }
         let mut kids = vec![0u32; first[n + 1] as usize];
         let mut roots = Vec::new();
-        for id in 0..n as u32 {
+        for id in (0..n as u32).filter(|&id| !index.is_gone(id)) {
             match index.parent(id) {
                 Some(p) => {
                     let slot = &mut first[p as usize + 1];
@@ -110,7 +112,7 @@ impl Tree {
         }
         largest_first(&mut roots);
         let rows = roots.iter().map(|&id| Node { id, depth: 0, open: false }).collect();
-        let mut tree = Tree { total, files, folders, newest, first, kids, roots, rows, sel: 0, top: 0 };
+        let mut tree = Tree { total, files, folders, newest, first, kids, roots, gone: Default::default(), rows, sel: 0, top: 0 };
         if tree.roots.len() == 1 {
             tree.open(0);
         }
@@ -144,6 +146,38 @@ impl Tree {
     }
 
     /// Shows the children of a row; returns false if it has none.
+    /// Takes entry `id` out of the tree, as when it was deleted: its size
+    /// and counts come off every folder above it, and it leaves the rows
+    /// (with what is shown inside it). Cheap: no rebuild.
+    pub fn remove(&mut self, index: &Index, id: u32) {
+        let i = id as usize;
+        if i >= self.total.len() || self.gone.contains(&id) {
+            return;
+        }
+        let (size, files, folders) = (self.total[i], self.files[i], self.folders[i] + index.is_dir(id) as u32);
+        let mut up = index.parent(id);
+        while let Some(p) = up {
+            let p = p as usize;
+            self.total[p] = self.total[p].saturating_sub(size);
+            self.files[p] = self.files[p].saturating_sub(files);
+            self.folders[p] = self.folders[p].saturating_sub(folders);
+            up = index.parent(p as u32);
+        }
+        self.gone.insert(id);
+        // Its row and the rows shown inside it, which are deeper.
+        if let Some(row) = self.rows.iter().position(|n| n.id == id) {
+            let depth = self.rows[row].depth;
+            let end = row + 1 + self.rows[row + 1..].iter().take_while(|n| n.depth > depth).count();
+            self.rows.drain(row..end);
+            if self.sel >= end {
+                self.sel -= end - row;
+            } else if self.sel >= row {
+                self.sel = row.min(self.rows.len().saturating_sub(1));
+            }
+            self.top = self.top.min(self.rows.len().saturating_sub(1));
+        }
+    }
+
     pub fn open(&mut self, row: usize) -> bool {
         let Some(node) = self.rows.get(row).filter(|n| !n.open) else { return false };
         let (id, depth) = (node.id, node.depth + 1);
@@ -151,7 +185,8 @@ impl Tree {
         if range.is_empty() {
             return false;
         }
-        let children: Vec<Node> = self.kids[range].iter().map(|&id| Node { id, depth, open: false }).collect();
+        let children: Vec<Node> =
+            self.kids[range].iter().filter(|id| !self.gone.contains(id)).map(|&id| Node { id, depth, open: false }).collect();
         if self.sel > row {
             self.sel += children.len();
         }
@@ -263,9 +298,10 @@ impl Tree {
         // Children are sorted, so the ones too small to draw are the tail.
         let scale = w as f64 * h as f64 / sum as f64;
         let room = MAX_TILES.saturating_sub(out.len());
-        let areas: Vec<f64> = self.kids(id).iter().map(|&k| self.total(k) as f64 * scale).take_while(|&a| a >= 12.0).take(room).collect();
+        let kids: Vec<u32> = self.kids(id).iter().copied().filter(|k| !self.gone.contains(k)).collect();
+        let areas: Vec<f64> = kids.iter().map(|&k| self.total(k) as f64 * scale).take_while(|&a| a >= 12.0).take(room).collect();
         let rects = squarify(&areas, x as f64, y as f64, w as f64, h as f64);
-        for (&kid, (rx, ry, rw, rh)) in self.kids(id).iter().zip(rects) {
+        for (&kid, (rx, ry, rw, rh)) in kids.iter().zip(rects) {
             // Rounding both edges keeps neighbours flush.
             let (x0, y0) = (rx.round() as i32, ry.round() as i32);
             let (tw, th) = ((rx + rw).round() as i32 - x0, (ry + rh).round() as i32 - y0);

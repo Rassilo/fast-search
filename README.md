@@ -511,7 +511,10 @@ What differs from Linux:
   `%APPDATA%\ff` (settings, bookmarks).
 - **Desktop actions** use the shell: open with the default application,
   show in Explorer, the file type's *Edit* action (else Notepad), and
-  moving to the Recycle Bin.
+  deleting: Del (to the Recycle Bin) and Shift+Del (for good) are handed
+  to Windows, which asks and shows its progress as Explorer does. Deletes
+  run in the background on every system, and the results drop what went
+  at once, without rebuilding the index.
 - **`ff -i`** runs in Windows Terminal or the classic console. Enter and
   F4 open `%VISUAL%` or `%EDITOR%`, else Notepad. There is no `sudoedit`
   and no Ctrl+Z suspend.

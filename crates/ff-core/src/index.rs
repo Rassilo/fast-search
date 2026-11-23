@@ -125,6 +125,9 @@ impl<T> From<Vec<T>> for Col<T> {
 pub const NO_PARENT: u32 = u32::MAX;
 pub const FLAG_DIR: u8 = 1;
 pub const FLAG_SYMLINK: u8 = 2;
+/// The entry was deleted since the index was built: searches and the
+/// sizes tree skip it. The next build leaves it out for good.
+pub const FLAG_GONE: u8 = 0x80;
 
 const MAGIC: &[u8; 8] = b"FFIDX\x00\x00\x01";
 
@@ -279,6 +282,35 @@ impl Index {
         self.mtime.to_mut().push(mtime);
         self.flags.to_mut().push(flags);
         id as u32
+    }
+
+    /// True if the entry was removed since the index was built.
+    pub fn is_gone(&self, id: u32) -> bool {
+        self.flags[id as usize] & FLAG_GONE != 0
+    }
+
+    /// Marks `ids`, and everything inside them, as removed: at once, in
+    /// one pass over the index, without rebuilding it (searches skip
+    /// them; ids stay valid).
+    pub fn remove(&mut self, ids: &[u32]) {
+        if ids.is_empty() {
+            return;
+        }
+        let flags = self.flags.to_mut();
+        for &id in ids {
+            if let Some(f) = flags.get_mut(id as usize) {
+                *f |= FLAG_GONE;
+            }
+        }
+        // Children follow their parent, so one ascending pass carries the
+        // mark down to everything below.
+        let first = ids.iter().copied().min().unwrap_or(0) as usize;
+        for i in first..flags.len() {
+            let parent = self.parent[i];
+            if parent != NO_PARENT && flags[parent as usize] & FLAG_GONE != 0 {
+                flags[i] |= FLAG_GONE;
+            }
+        }
     }
 
     /// Sets an entry's size and modification time.

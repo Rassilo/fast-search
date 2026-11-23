@@ -279,3 +279,39 @@ pub(crate) fn disk_space(dir: &Path) -> Option<(u64, u64)> {
     let ok = unsafe { GetDiskFreeSpaceExW(dir.as_ptr(), &mut avail, &mut total, &mut free) };
     (ok != 0 && total > 0).then_some((total, free))
 }
+
+/// Hands `paths` to Windows to delete, as Explorer does: with Windows'
+/// own confirmation (always asked before deleting for good), progress
+/// window and errors. To the Recycle Bin unless `permanent`; Windows
+/// warns about items too big for it. `owner` is the window the dialogs
+/// belong to (0 for none). Returns false if the user cancelled.
+pub fn shell_delete(paths: &[PathBuf], permanent: bool, owner: isize) -> io::Result<bool> {
+    const FO_DELETE: u32 = 3;
+    const FOF_ALLOWUNDO: u16 = 0x40;
+    const FOF_WANTNUKEWARNING: u16 = 0x4000;
+    // One list of full paths, each ending in a NUL, the list in two.
+    let mut from = Vec::new();
+    for path in paths {
+        from.extend(crate::os::wide(std::path::absolute(path)?.as_os_str()));
+    }
+    from.push(0);
+    let mut op = SHFILEOPSTRUCTW {
+        hwnd: owner as HWND,
+        wFunc: FO_DELETE,
+        pFrom: from.as_ptr(),
+        pTo: std::ptr::null(),
+        fFlags: if permanent { 0 } else { FOF_ALLOWUNDO | FOF_WANTNUKEWARNING },
+        fAnyOperationsAborted: 0,
+        hNameMappings: std::ptr::null_mut(),
+        lpszProgressTitle: std::ptr::null(),
+    };
+    // SAFETY: `op` and the list it points to live through the call.
+    let r = unsafe { SHFileOperationW(&mut op) };
+    match (r, op.fAnyOperationsAborted) {
+        (_, 1..) => Ok(false),
+        // 0x4C7 (ERROR_CANCELLED): the confirmation was answered No.
+        (0x4C7, _) => Ok(false),
+        (0, _) => Ok(true),
+        (code, _) => Err(io::Error::other(format!("Windows could not delete everything (error {code})"))),
+    }
+}

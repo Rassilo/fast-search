@@ -1064,6 +1064,10 @@ impl Backend for Win32 {
         Ok(())
     }
 
+    fn native_window(&self) -> isize {
+        self.main as isize
+    }
+
     fn hide_to_tray(&mut self) -> bool {
         const SW_HIDE: i32 = 0;
         if !with(|s| std::mem::replace(&mut s.tray, true)) {

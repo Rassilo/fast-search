@@ -519,6 +519,10 @@ struct App {
     auto_drives: bool,
     /// The files a confirmation dialog is asking about.
     pending_paths: Vec<PathBuf>,
+    /// The index entries of `pending_paths`, in the same order.
+    pending_ids: Vec<u32>,
+    /// A delete running in the background: its result arrives here.
+    deleting: Option<mpsc::Receiver<Deleted>>,
     /// That drop was a move, so the files leave the results when it ends.
     drop_moved: bool,
     last_click: (u32, usize),
@@ -891,6 +895,8 @@ impl App {
             drive_selected: 0,
             auto_drives: true,
             pending_paths: Vec::new(),
+            pending_ids: Vec::new(),
+            deleting: None,
             drop_moved: false,
             last_click: (0, usize::MAX),
         };
@@ -1010,16 +1016,18 @@ impl App {
             Ok("trash-all-now") => {
                 // Trashes every result of the query without asking (tests only).
                 self.marks = (0..self.hits.len()).collect();
-                self.pending_paths = self.selected_paths();
+                (self.pending_ids, self.pending_paths) = self.selected_entries();
                 self.act(Action::ConfirmTrash, 0);
+                self.finish_delete(true);
                 eprintln!("{} | results left: {}", self.status, self.hits.len());
                 return Ok(());
             }
             Ok("trash-now") => {
                 // Trashes the selected result without asking (tests only).
                 if self.sel < self.hits.len() {
-                    self.pending_paths = self.selected_paths();
+                    (self.pending_ids, self.pending_paths) = self.selected_entries();
                     self.act(Action::ConfirmTrash, 0);
+                    self.finish_delete(true);
                     eprintln!("{} | results left: {}", self.status, self.hits.len());
                 }
                 return Ok(());
@@ -1081,6 +1089,10 @@ impl App {
                 self.act(Action::SelectAll, 0);
                 dirty = true;
             }
+            // A delete running in the background finished.
+            if self.deleting.is_some() && self.finish_delete(false) {
+                dirty = true;
+            }
             // A message in the status bar goes away by itself, unless it
             // reports something still going on.
             if self.status != shown.0 {
@@ -1097,7 +1109,11 @@ impl App {
             // While idle, wake once a second to notice a refreshed index.
             // While indexing, wake often to move the progress along.
             // Hidden (Linux), wake often to answer another start quickly.
-            let idle = if self.building.is_some() || (self.hidden && cfg!(unix)) { Duration::from_millis(150) } else { Duration::from_secs(1) };
+            let idle = if self.building.is_some() || self.deleting.is_some() || (self.hidden && cfg!(unix)) {
+                Duration::from_millis(150)
+            } else {
+                Duration::from_secs(1)
+            };
             let wait = if dirty { Duration::ZERO } else { idle };
             let Some(event) = self.b.next_event(Some(wait))? else {
                 if !dirty {
@@ -1692,26 +1708,8 @@ impl App {
                 return;
             }
             Action::ConfirmTrash | Action::ConfirmDelete => {
-                let paths = std::mem::take(&mut self.pending_paths);
-                let trash = action == Action::ConfirmTrash;
-                let mut failures = Vec::new();
-                for path in &paths {
-                    if let Err(e) = if trash { desktop::trash(path) } else { desktop::delete(path) } {
-                        failures.push(format!("{}: {e}", path.display()));
-                    }
-                }
-                let done = paths.len() - failures.len();
-                let what = match &paths[..] {
-                    [one] => one.display().to_string(),
-                    _ => trf("{} items", &[&done]),
-                };
-                self.status = match (&failures[..], trash) {
-                    ([], true) => trf("Moved {} to the trash", &[&what]),
-                    ([], false) => trf("Deleted {}", &[&what]),
-                    ([one], _) if paths.len() == 1 => one.clone(),
-                    (failed, _) => format!("{done} done, {} failed; first: {}", failed.len(), failed[0]),
-                };
-                return self.forget(&paths);
+                let (ids, paths) = (std::mem::take(&mut self.pending_ids), std::mem::take(&mut self.pending_paths));
+                return self.start_delete(ids, paths, action == Action::ConfirmTrash);
             }
             Action::Quit => return self.quit = true,
             Action::ZoomIn | Action::ZoomOut | Action::ZoomReset => {
@@ -1835,6 +1833,12 @@ impl App {
             }
             Action::Trash | Action::DeleteForever => {
                 let forever = action == Action::DeleteForever;
+                // Windows asks and shows the progress itself, as Explorer
+                // does (test runs keep our dialog, to draw it).
+                if cfg!(windows) && std::env::var_os("FF_GUI_TEST").is_none() {
+                    let (ids, paths) = self.selected_entries();
+                    return self.start_delete(ids, paths, !forever);
+                }
                 let question = match (forever, many, self.index.is_dir(id)) {
                     (false, true, _) => trf("Move these {} items to the trash?", &[&paths.len()]),
                     (false, false, true) => tr("Move this folder and everything in it to the trash?").to_string(),
@@ -1861,7 +1865,7 @@ impl App {
                 } else {
                     ("Move to trash", vec![("Cancel", None), ("Move to trash", Some(Action::ConfirmTrash))], 1)
                 };
-                self.pending_paths = paths;
+                (self.pending_ids, self.pending_paths) = self.selected_entries();
                 if let Err(e) = self.open_dialog(title, rows, buttons, focus, forever) {
                     self.status = e.to_string();
                 }
@@ -2191,6 +2195,87 @@ impl App {
 
     /// Makes the results reflect that `paths` were just removed, without
     /// waiting for the next index refresh.
+    /// Deletes `paths` (index entries `ids`) on a worker thread, so the
+    /// window stays responsive: to the trash, or for good. On Windows,
+    /// Windows itself does it, with its own confirmation and progress.
+    /// The outcome comes back through `deleting` (see `finish_delete`).
+    fn start_delete(&mut self, ids: Vec<u32>, paths: Vec<PathBuf>, trash: bool) {
+        if paths.is_empty() || self.deleting.is_some() {
+            return;
+        }
+        let count = paths.len();
+        self.status = if trash { trf("Moving {} items to the trash...", &[&count]) } else { trf("Deleting {} items...", &[&count]) };
+        let (tx, rx) = mpsc::channel();
+        self.deleting = Some(rx);
+        #[cfg(windows)]
+        let owner = self.b.native_window();
+        std::thread::spawn(move || {
+            #[cfg(windows)]
+            let outcome = match ff_core::win::shell_delete(&paths, !trash, owner) {
+                Ok(true) => None,
+                Ok(false) => Some(tr("Cancelled").to_string()),
+                Err(e) => Some(e.to_string()),
+            };
+            #[cfg(not(windows))]
+            let outcome = {
+                let failed: Vec<String> = paths
+                    .iter()
+                    .filter_map(|p| (if trash { desktop::trash(p) } else { desktop::delete(p) }).err().map(|e| format!("{}: {e}", p.display())))
+                    .collect();
+                failed.first().map(|first| format!("{} failed; first: {first}", failed.len()))
+            };
+            let _ = tx.send(Deleted { ids, paths, trash, problem: outcome });
+        });
+    }
+
+    /// Takes a finished delete's outcome, if one is ready (or, with
+    /// `wait`, waits for it): what is really gone leaves the results and
+    /// the sizes tree at once, without rebuilding the index.
+    fn finish_delete(&mut self, wait: bool) -> bool {
+        let Some(rx) = &self.deleting else { return false };
+        let done = if wait { rx.recv().ok() } else { rx.try_recv().ok() };
+        let Some(done) = done else {
+            // The worker died without a word: stop waiting for it.
+            if wait || matches!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected)) {
+                self.deleting = None;
+            }
+            return false;
+        };
+        self.deleting = None;
+        // Only what is really gone, and still the same entry.
+        let mut gone = Vec::new();
+        for (&id, path) in done.ids.iter().zip(&done.paths) {
+            let same = (id as usize) < self.index.len() && self.index.path(id) == *path;
+            if same && std::fs::symlink_metadata(path).is_err() {
+                gone.push(id);
+            }
+        }
+        if let Some(tree) = self.tree.as_mut() {
+            for &id in &gone {
+                tree.remove(&self.index, id);
+            }
+        }
+        self.index.remove(&gone);
+        if let Some(build) = &mut self.building {
+            build.forgotten.extend(done.paths.iter().filter(|p| std::fs::symlink_metadata(p).is_err()).cloned());
+        }
+        let (sel, top) = (self.sel, self.top);
+        self.search();
+        self.sel = sel.min(self.hits.len().saturating_sub(1));
+        self.top = top.min(self.max_top());
+        let what = match &done.paths[..] {
+            [one] if gone.len() == 1 => one.display().to_string(),
+            _ => trf("{} items", &[&gone.len()]),
+        };
+        self.status = match (done.problem, done.trash) {
+            (Some(problem), _) if gone.is_empty() => problem,
+            (Some(problem), _) => format!("{} {}      {problem}", gone.len(), tr("removed")),
+            (None, true) => trf("Moved {} to the trash", &[&what]),
+            (None, false) => trf("Deleted {}", &[&what]),
+        };
+        true
+    }
+
     fn forget(&mut self, paths: &[PathBuf]) {
         if let Some(build) = &mut self.building {
             build.forgotten.extend_from_slice(paths);
@@ -2606,6 +2691,11 @@ impl App {
             return if self.sel < self.hits.len() { vec![self.sel] } else { Vec::new() };
         }
         self.marks.iter().copied().filter(|&r| r < self.hits.len()).collect()
+    }
+
+    /// The selected rows' index entries and paths.
+    fn selected_entries(&self) -> (Vec<u32>, Vec<PathBuf>) {
+        self.selected_rows().into_iter().map(|r| (self.hits[r], self.index.path(self.hits[r]))).unzip()
     }
 
     fn selected_paths(&self) -> Vec<PathBuf> {
@@ -3507,4 +3597,13 @@ mod portable_tests {
             assert_eq!(trim_folder(r"C:\"), r"C:\");
         }
     }
+}
+
+/// What a background delete reports back.
+struct Deleted {
+    ids: Vec<u32>,
+    paths: Vec<PathBuf>,
+    trash: bool,
+    /// What went wrong, or that the user cancelled; None if all went.
+    problem: Option<String>,
 }

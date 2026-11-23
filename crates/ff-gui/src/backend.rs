@@ -91,6 +91,13 @@ pub trait Backend {
     /// leaves it to us whatever was asked.
     fn set_own_title_bar(&mut self, own: bool) -> bool;
     /// Shows the main window again, in front, after `hide_to_tray`.
+    /// The main window's system handle (Windows: its HWND), for dialogs
+    /// the system shows on its behalf; 0 where there is none.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn native_window(&self) -> isize {
+        0
+    }
+
     #[cfg_attr(windows, allow(dead_code))] // Windows shows on a window message
     fn show(&mut self) {}
 

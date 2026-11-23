@@ -508,6 +508,9 @@ impl Index {
         let has_path_terms = query.terms.iter().any(|t| t.path);
         for i in range {
             let id = i as u32;
+            if self.flags[i] & crate::index::FLAG_GONE != 0 {
+                continue;
+            }
             match kind {
                 Kind::Any => {}
                 Kind::File if self.is_dir(id) => continue,

@@ -36,7 +36,7 @@ mod walk;
 #[cfg(windows)]
 pub mod win;
 
-pub use index::{FLAG_DIR, FLAG_SYMLINK, Index, NO_PARENT};
+pub use index::{FLAG_DIR, FLAG_GONE, FLAG_SYMLINK, Index, NO_PARENT};
 pub use query::{CaseMode, Kind, Query, QueryOptions, SearchOptions, Sort};
 pub use time::{local_civil, utc_civil};
 pub use walk::BuildOptions;
