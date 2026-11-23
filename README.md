@@ -380,10 +380,14 @@ the built-in icons are used; *Options → View → File icons from the
 system* turns this off.
 
 One copy runs per user. Closing the window (or Esc on an empty search)
-keeps it running with the index loaded, hidden (on Windows, in the
-notification area; Linux desktops have no common tray), and the global
-shortcut or starting `ff-gui` again shows it at once. *File → Quit*
-(Ctrl+Q) exits. *Options → Desktop* turns the hiding off, and *Start at
+ends its search and keeps the program running with the index loaded,
+hidden (on Windows, in the notification area; Linux desktops have no
+common tray). The global shortcut, or starting `ff-gui` again, then
+shows it at once with an empty search; pressed while a window is open,
+it opens another search window, as Everything does. Each window has a
+search, results and view of its own; all share one index, kept current
+once for all, and the settings. Closing one of these other windows
+closes it for good. *File → Quit* (Ctrl+Q) exits. *Options → Desktop* turns the hiding off, and *Start at
 sign-in, hidden* adds the program to the session's start (on Linux an
 XDG autostart entry, `~/.config/autostart/ff-gui.desktop`).
 
@@ -555,7 +559,8 @@ What differs from Linux:
   column; those after it move along.
   Closing the window (its X, Alt+F4, or Esc on an empty search) hides it
   to the notification area, index loaded: the shortcut, or starting
-  `ff-gui` again, shows it at once. *File → Quit*, Ctrl+Q or the tray
+  `ff-gui` again, shows it at once, empty; pressed again while it is
+  open, the shortcut opens another search window. *File → Quit*, Ctrl+Q or the tray
   icon's *Exit* quit for real; *Options → Desktop* turns the hiding off.
   There too, *Start at sign-in* starts it hidden when you sign in (also
   a choice in the installer), so the shortcut is instant from the start.

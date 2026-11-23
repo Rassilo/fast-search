@@ -121,7 +121,7 @@ const FONT_PX: f32 = 14.5;
 /// Side of the resize grip in the bottom-right corner, in layout units.
 const GRIP: i32 = 16;
 /// The main window's title (on Windows also how a second start finds it).
-const WINDOW_TITLE: &str = "Fast search";
+pub(crate) const WINDOW_TITLE: &str = "Fast search";
 /// Width of each window button (minimize, maximize, close) in our title
 /// bar, in layout units, as Windows draws them.
 const TITLE_BUTTON: i32 = 46;
@@ -566,6 +566,79 @@ struct App {
     bookmarks: Vec<ff_core::bookmarks::Bookmark>,
     bookmark_selected: usize,
     bookmark_items: Items,
+
+    /// The search windows other than the one in the fields above, by
+    /// number (None: closed, or the current one). See `Session`.
+    windows: Vec<Option<Session>>,
+    /// The number of the search window whose state is in the fields.
+    current: u8,
+    /// The current window has changes not drawn yet (kept for each window
+    /// while another is current).
+    pending_draw: bool,
+    /// Something every window shows changed (theme, scale, language, a
+    /// new index): all are drawn again.
+    redraw_all: bool,
+}
+
+/// Declares the state each search window has of its own: `Session`
+/// holds it for the windows not current, and `App::swap_session`
+/// exchanges it with the fields of `App`, which always hold the current
+/// window's. The index, settings, dialog and background work are shared
+/// by all windows (one engine, as in Everything).
+macro_rules! per_window {
+    ($($field:ident: $ty:ty,)*) => {
+        struct Session {
+            $($field: $ty,)*
+        }
+
+        impl App {
+            fn swap_session(&mut self, s: &mut Session) {
+                $(std::mem::swap(&mut self.$field, &mut s.$field);)*
+            }
+        }
+    };
+}
+
+per_window! {
+    cv: Canvas,
+    drag_arm: Option<DragArm>,
+    column_drag: Option<usize>,
+    query: String,
+    cursor: usize,
+    anchor: usize,
+    box_scroll: i32,
+    selecting: bool,
+    last_box_click: u32,
+    hits: Vec<u32>,
+    sel: usize,
+    marks: BTreeSet<usize>,
+    anchor_row: usize,
+    collapse_on_release: Option<usize>,
+    top: usize,
+    kind: Kind,
+    case: CaseMode,
+    regex: bool,
+    whole_word: bool,
+    query_error: Option<String>,
+    sort: Sort,
+    reverse: bool,
+    status: String,
+    menu: Option<Menu>,
+    props: Option<Vec<(&'static str, String)>>,
+    about: bool,
+    hover_button: Option<usize>,
+    last_title_click: u32,
+    dragging_scrollbar: bool,
+    hover_row: Option<usize>,
+    results_stale: bool,
+    tree_refreshed: Instant,
+    last_click: (u32, usize),
+    tree: Option<tree::Tree>,
+    tiles: Vec<tree::Tile>,
+    disks: Vec<(u32, (u64, u64))>,
+    tile_hover: Option<u32>,
+    complete: Option<complete::Complete>,
+    pending_draw: bool,
 }
 
 fn main() -> ExitCode {
@@ -925,6 +998,10 @@ impl App {
             follow: None,
             results_stale: false,
             tree_refreshed: Instant::now(),
+            windows: vec![None],
+            current: 0,
+            pending_draw: false,
+            redraw_all: false,
             drop_moved: false,
             last_click: (0, usize::MAX),
         };
@@ -1080,6 +1157,18 @@ impl App {
                 self.finish_build(true);
             }
             Ok("tree") => self.toggle_tree(),
+            // A second window, searching on its own (the first keeps its
+            // search): the snapshot shows the second.
+            Ok("second-window") => {
+                self.query = "first".into();
+                self.search();
+                self.summoned();
+                self.query = "second".into();
+                self.search();
+                self.switch_to(0);
+                assert_eq!(self.query, "first");
+                self.switch_to(1);
+            }
             Ok("complete") => self.update_completion(),
             Ok("bookmarks") => self.open_bar_menu(4),
             Ok("bookmark-add") => self.act(Action::AddBookmark, 0),
@@ -1112,8 +1201,7 @@ impl App {
             // asked for the window (Linux; Windows sends a message).
             #[cfg(unix)]
             if self.wake.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
-                self.b.show();
-                self.hidden = false;
+                self.summoned();
                 self.refresh_if_stale();
                 self.act(Action::SelectAll, 0);
                 dirty = true;
@@ -1129,6 +1217,11 @@ impl App {
             // Files changed on the drives (without the daemon).
             if self.follow_changes() {
                 dirty = true;
+            }
+            // Something all windows show changed: draw them all.
+            if std::mem::take(&mut self.redraw_all) && self.windows.iter().any(Option::is_some) {
+                self.render_all()?;
+                dirty = false;
             }
             // A message in the status bar goes away by itself, unless it
             // reports something still going on.
@@ -1177,6 +1270,28 @@ impl App {
                 dirty = false;
                 continue;
             };
+            // Events go to the window they happened in: it becomes current.
+            // (With the dialog open, the others take no input.)
+            let target = match &event {
+                Event::Redraw(w) | Event::Close(w) | Event::Resize(w, ..) => Some(*w),
+                Event::Key { win, .. } | Event::Press { win, .. } | Event::Motion { win, .. } | Event::Scroll { win, .. } => Some(*win),
+                Event::Release { win, .. } => Some(*win),
+                Event::Shown => Some(backend::FIRST),
+                _ => None,
+            };
+            if let Some(Win::Main(n)) = target.filter(|_| self.dialog.is_none()) {
+                if n != self.current {
+                    if dirty {
+                        self.render()?;
+                    }
+                    self.pending_draw = false;
+                    self.switch_to(n);
+                    dirty = std::mem::take(&mut self.pending_draw) || n == self.current;
+                }
+            }
+            if self.dialog.is_some() && matches!(target, Some(Win::Main(n)) if n != self.current) {
+                continue;
+            }
             // The dialog is modal: it gets its own events, and the main
             // window takes no input while it is open.
             if self.dialog.is_some() {
@@ -1196,7 +1311,7 @@ impl App {
             }
             match event {
                 Event::Redraw(_) => dirty = true,
-                Event::Resize(w, h) => {
+                Event::Resize(_, w, h) => {
                     if (w, h) != (self.cv.w, self.cv.h) {
                         self.cv.resize(w, h);
                         self.menu = None;
@@ -1222,6 +1337,10 @@ impl App {
                     }
                 }
                 Event::Quit => return Ok(()),
+                Event::Summoned => {
+                    self.summoned();
+                    dirty = true;
+                }
                 // Back from the notification area: typing replaces the
                 // last search.
                 Event::Shown => {
@@ -1465,6 +1584,7 @@ impl App {
         if let Some(f) = &mut self.follow {
             f.replaced();
         }
+        self.research_all();
         self.restore_tree(kept);
         let (sel, top) = (self.sel, self.top);
         self.search();
@@ -1511,14 +1631,20 @@ impl App {
             }
             follow::Found::Changed => {
                 let touched = f.take_touched();
-                // Hidden, nobody sees the list: it is searched again when
-                // the window shows.
-                if self.hidden {
-                    self.results_stale = true;
-                    return false;
-                }
-                self.update_results(old_len, &touched);
-                true
+                // Every window's results; a hidden one is searched again
+                // when it shows (nobody sees it meanwhile).
+                let current = self.current;
+                self.each_window(|app| {
+                    if app.current == 0 && app.hidden {
+                        app.results_stale = true;
+                    } else {
+                        app.update_results(old_len, &touched);
+                        if app.current != current {
+                            let _ = app.render();
+                        }
+                    }
+                });
+                !(self.current == 0 && self.hidden)
             }
         }
     }
@@ -1632,6 +1758,7 @@ impl App {
                 if let Some(f) = &mut self.follow {
                     f.replaced();
                 }
+                self.research_all();
                 self.restore_tree(kept);
                 self.status = trf("Indexed {} entries in {} s", &[&group_digits(self.index.len() as u64), &format!("{:.1}", took.as_secs_f64())]);
                 if !forgotten.is_empty() {
@@ -2467,6 +2594,7 @@ impl App {
 
     /// Switches the texts to the chosen language.
     fn apply_language(&mut self) {
+        self.redraw_all = true;
         i18n::set_language(match self.language {
             0 => i18n::system_language(),
             chosen => chosen as usize - 1,
@@ -2476,6 +2604,7 @@ impl App {
     /// Switches the palette to the chosen theme; "follow the desktop"
     /// asks the desktop whether it prefers dark.
     fn apply_theme(&mut self) {
+        self.redraw_all = true;
         // FF_GUI_THEME=<first word of a theme's name> pins it, for test
         // pictures: light, dark, graphite, ...
         let pinned = std::env::var("FF_GUI_THEME").ok().and_then(|t| {
@@ -2623,6 +2752,7 @@ impl App {
         let scale = scale.unwrap_or(self.auto_scale).clamp(0.75, 4.0);
         let Ok(mut text) = Text::load((FONT_PX * scale).round()) else { return };
         self.scale = scale;
+        self.redraw_all = true;
         self.u = (scale.round() as i32).max(1);
         self.size_w = text.width("000,000,000 KB") + 16 * self.u;
         self.date_w = text.width("0000-00-00 00:00") + 16 * self.u;
@@ -2701,14 +2831,176 @@ impl App {
         }
     }
 
-    /// Closes the window as the user asked (its close button, Alt+F4, Esc
-    /// on an empty search): on Windows it hides to the notification area,
-    /// to come back at once with the shortcut. True if it did; else the
-    /// program should exit.
+    /// Closes the current window as the user asked (its close button,
+    /// Alt+F4, Esc on an empty search), ending its search. Another
+    /// window is closed for good; the first hides (on Windows to the
+    /// notification area), to come back at once, empty, with the shortcut.
+    /// True if it did; else the program should exit.
     fn dismiss(&mut self) -> bool {
         self.menu = None;
-        self.hidden = self.flag(Flag::CloseToTray) && self.b.hide_to_tray();
+        if self.current != 0 {
+            self.close_current_window();
+            return true;
+        }
+        let others = self.windows.iter().skip(1).any(Option::is_some);
+        self.hidden = (self.flag(Flag::CloseToTray) || others) && self.b.hide_to_tray();
+        if self.hidden {
+            self.reset_session();
+        }
         self.hidden
+    }
+
+    /// A new window's state: an empty search with the current options.
+    fn blank_session(&self) -> Session {
+        Session {
+            cv: Canvas::new(),
+            drag_arm: None,
+            column_drag: None,
+            query: String::new(),
+            cursor: 0,
+            anchor: 0,
+            box_scroll: 0,
+            selecting: false,
+            last_box_click: 0,
+            hits: Vec::new(),
+            sel: 0,
+            marks: BTreeSet::new(),
+            anchor_row: 0,
+            collapse_on_release: None,
+            top: 0,
+            kind: self.kind,
+            case: self.case,
+            regex: self.regex,
+            whole_word: self.whole_word,
+            query_error: None,
+            sort: self.sort,
+            reverse: self.reverse,
+            status: String::new(),
+            menu: None,
+            props: None,
+            about: false,
+            hover_button: None,
+            last_title_click: 0,
+            dragging_scrollbar: false,
+            hover_row: None,
+            results_stale: false,
+            tree_refreshed: Instant::now(),
+            last_click: (0, usize::MAX),
+            tree: None,
+            tiles: Vec::new(),
+            disks: Vec::new(),
+            tile_hover: None,
+            complete: None,
+            pending_draw: true,
+        }
+    }
+
+    /// Ends the current window's search: it starts again empty (its size
+    /// kept).
+    fn reset_session(&mut self) {
+        let mut blank = self.blank_session();
+        std::mem::swap(&mut blank.cv, &mut self.cv);
+        self.swap_session(&mut blank);
+        self.search();
+    }
+
+    /// Makes window `n` the current one: its state moves into the fields.
+    fn switch_to(&mut self, n: u8) {
+        if n == self.current {
+            return;
+        }
+        let Some(mut s) = self.windows.get_mut(n as usize).and_then(Option::take) else { return };
+        self.swap_session(&mut s);
+        let old = self.current as usize;
+        self.windows[old] = Some(s);
+        self.current = n;
+        self.b.select(n);
+    }
+
+    /// The shortcut was pressed (or the program started again): the first
+    /// window shows if it was closed, else another window opens, each with
+    /// a search of its own.
+    fn summoned(&mut self) {
+        if self.hidden {
+            self.switch_to(0);
+            self.b.show();
+            self.hidden = false;
+            return;
+        }
+        match self.b.open_window() {
+            Ok(n) => {
+                let n = n as usize;
+                if self.windows.len() <= n {
+                    self.windows.resize_with(n + 1, || None);
+                }
+                self.windows[n] = Some(self.blank_session());
+                self.switch_to(n as u8);
+                self.search();
+            }
+            // A desktop that cannot open another: a fresh search here.
+            Err(_) => {
+                self.b.show();
+                self.reset_session();
+            }
+        }
+    }
+
+    /// Closes the current window (not the first) for good; the first
+    /// becomes current.
+    fn close_current_window(&mut self) {
+        let closing = self.current;
+        if closing == 0 {
+            return;
+        }
+        self.b.close_window(closing);
+        let Some(mut first) = self.windows[0].take() else { return };
+        self.swap_session(&mut first); // the closed window's state is dropped
+        self.current = 0;
+        self.b.select(0);
+        if self.windows.len() > closing as usize {
+            self.windows[closing as usize] = None;
+        }
+        self.pending_draw = true;
+    }
+
+    /// Runs `f` for every open window, each made current in turn, then
+    /// makes the original current again.
+    fn each_window(&mut self, mut f: impl FnMut(&mut App)) {
+        let start = self.current;
+        let open: Vec<u8> = (0..self.windows.len() as u8).filter(|&n| n == start || self.windows[n as usize].is_some()).collect();
+        for n in open {
+            self.switch_to(n);
+            f(self);
+        }
+        self.switch_to(start);
+    }
+
+    /// Draws every open window (after something they all show changed).
+    fn render_all(&mut self) -> io::Result<()> {
+        let mut result = Ok(());
+        self.each_window(|app| {
+            if app.current == 0 && app.hidden {
+                return;
+            }
+            if let Err(e) = app.render() {
+                result = Err(e);
+            }
+            app.pending_draw = false;
+        });
+        result
+    }
+
+    /// The index was replaced: every window searches it again.
+    fn research_all(&mut self) {
+        let current = self.current;
+        self.each_window(|app| {
+            if app.current != current {
+                let kept = app.keep_tree();
+                app.restore_tree(kept);
+                app.search();
+            }
+        });
+        self.redraw_all = true;
     }
 
     /// A left press on the title bar or window edge; true if handled.
@@ -3720,7 +4012,7 @@ impl App {
 
     /// Shows the frame in the main window.
     fn present(&mut self) -> io::Result<()> {
-        self.b.present(Win::Main, &self.cv)
+        self.b.present(Win::Main(self.current), &self.cv)
     }
 }
 

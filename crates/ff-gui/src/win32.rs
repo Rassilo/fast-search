@@ -18,7 +18,7 @@ use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::backend::{Backend, Cursor, Event, Key, Mods, Win, WindowSpec};
+use crate::backend::{Backend, Cursor, Event, FIRST, Key, Mods, Win, WindowSpec};
 use crate::canvas::{Canvas, Icon};
 use crate::keys::*;
 use crate::winsys::wide;
@@ -177,6 +177,7 @@ unsafe extern "system" {
     fn EnableWindow(hwnd: HWND, enable: BOOL) -> BOOL;
     fn SetForegroundWindow(hwnd: HWND) -> BOOL;
     fn IsZoomed(hwnd: HWND) -> BOOL;
+    fn IsWindowVisible(hwnd: HWND) -> BOOL;
     fn IsIconic(hwnd: HWND) -> BOOL;
     fn RegisterHotKey(hwnd: HWND, id: i32, mods: u32, vk: u32) -> BOOL;
     fn UnregisterHotKey(hwnd: HWND, id: i32) -> BOOL;
@@ -335,10 +336,14 @@ struct Frame {
 #[derive(Default)]
 struct Shared {
     events: VecDeque<Event>,
-    main: usize,
+    /// The search windows by number; 0 where one was closed.
+    mains: Vec<usize>,
     dialog: usize,
-    size: (usize, usize),
-    frames: [Option<Frame>; 2],
+    /// Each search window's last client size, by number.
+    sizes: Vec<(usize, usize)>,
+    /// The last frame shown in each search window, and in the dialog.
+    frames: Vec<Option<Frame>>,
+    dialog_frame: Option<Frame>,
     cursor: usize,
     /// The first half of a character outside the Basic Multilingual Plane.
     high_surrogate: u16,
@@ -370,14 +375,26 @@ fn push(event: Event) {
 
 fn win_of(hwnd: HWND) -> Option<Win> {
     with(|s| {
-        if hwnd as usize == s.main && s.main != 0 {
-            Some(Win::Main)
-        } else if hwnd as usize == s.dialog && s.dialog != 0 {
+        if hwnd as usize == s.dialog && s.dialog != 0 {
             Some(Win::Dialog)
         } else {
-            None
+            s.mains.iter().position(|&m| m == hwnd as usize && m != 0).map(|n| Win::Main(n as u8))
         }
     })
+}
+
+/// The frame last shown in `win`.
+fn frame_of(s: &mut Shared, win: Win) -> &mut Option<Frame> {
+    match win {
+        Win::Main(n) => {
+            let n = n as usize;
+            if s.frames.len() <= n {
+                s.frames.resize_with(n + 1, || None);
+            }
+            &mut s.frames[n]
+        }
+        Win::Dialog => &mut s.dialog_frame,
+    }
 }
 
 fn down(vk: i32) -> bool {
@@ -430,7 +447,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
     let Some(win) = win_of(hwnd) else { return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) } };
     // The notification-area icon: a click shows the window, a right
     // click offers Open and Exit.
-    if win == Win::Main && msg == crate::win_tray::TRAY_MESSAGE {
+    if win == FIRST && msg == crate::win_tray::TRAY_MESSAGE {
         const WM_LBUTTONUP: u32 = 0x202;
         const WM_LBUTTONDBLCLK: u32 = 0x203;
         const WM_RBUTTONUP: u32 = 0x205;
@@ -445,12 +462,13 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         }
         return 0;
     }
-    if win == Win::Main && msg == crate::win_tray::SHOW_MESSAGE {
-        show_main(hwnd);
+    // Another start of the program: as the global shortcut.
+    if win == FIRST && msg == crate::win_tray::SHOW_MESSAGE {
+        push(Event::Summoned);
         return 0;
     }
     // Explorer restarted: its notification area is new and empty.
-    if win == Win::Main && with(|s| s.tray) && msg == crate::win_tray::taskbar_created() {
+    if win == FIRST && with(|s| s.tray) && msg == crate::win_tray::taskbar_created() {
         crate::win_tray::add(hwnd, tray_icon(hwnd));
         return 0;
     }
@@ -460,15 +478,15 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         // (Restart Manager): really exit, even when closing only hides.
         WM_QUERYENDSESSION => return 1,
         // The global shortcut.
-        WM_HOTKEY if win == Win::Main => show_main(hwnd),
-        WM_ENDSESSION if win == Win::Main && wparam != 0 => push(Event::Quit),
+        WM_HOTKEY if win == FIRST => push(Event::Summoned),
+        WM_ENDSESSION if win == FIRST && wparam != 0 => push(Event::Quit),
         WM_DESTROY => {}
         WM_ERASEBKGND => return 1, // every pixel is painted by us
         // Our own title bar: the client area takes the caption's place.
         // The other borders stay Windows', for resizing and the shadow; a
         // maximized window hangs over the screen edge by its frame, so then
         // the top keeps that much back.
-        WM_NCCALCSIZE if win == Win::Main && wparam != 0 && with(|s| s.own_title) => {
+        WM_NCCALCSIZE if win != Win::Dialog && wparam != 0 && with(|s| s.own_title) => {
             // SAFETY: for WM_NCCALCSIZE with wparam set, lparam points at an
             // NCCALCSIZE_PARAMS, which starts with the proposed RECT.
             unsafe {
@@ -488,24 +506,30 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             let mut ps: PAINTSTRUCT = unsafe { std::mem::zeroed() };
             let dc = unsafe { BeginPaint(hwnd, &mut ps) };
             let size = client_size(hwnd);
-            let frame = with(|s| s.frames[win as usize].take());
+            let frame = with(|s| frame_of(s, win).take());
             let stale = frame.as_ref().is_none_or(|f| (f.w, f.h) != size);
             if let Some(frame) = frame {
                 blit(dc, &frame);
-                with(|s| s.frames[win as usize] = Some(frame));
+                with(|s| *frame_of(s, win) = Some(frame));
             }
             unsafe { EndPaint(hwnd, &ps) };
             if stale {
                 push(Event::Redraw(win));
             }
         }
-        WM_SIZE if win == Win::Main => {
+        WM_SIZE if win != Win::Dialog => {
             let size = (lo(lparam) as u16 as usize, hi(lparam) as u16 as usize);
+            let Win::Main(n) = win else { return 0 };
             // Zero while minimized: nothing to draw then.
             if size.0 > 0 && size.1 > 0 {
-                let changed = with(|s| std::mem::replace(&mut s.size, size) != size);
+                let changed = with(|s| {
+                    if s.sizes.len() <= n as usize {
+                        s.sizes.resize(n as usize + 1, (0, 0));
+                    }
+                    std::mem::replace(&mut s.sizes[n as usize], size) != size
+                });
                 if changed {
-                    push(Event::Resize(size.0, size.1));
+                    push(Event::Resize(win, size.0, size.1));
                 }
             }
         }
@@ -518,7 +542,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                 (*info.add(3)).y = (240.0 * scale) as i32;
             }
         }
-        WM_SETCURSOR if (lparam as u16) == HTCLIENT && win == Win::Main => {
+        WM_SETCURSOR if (lparam as u16) == HTCLIENT && win != Win::Dialog => {
             let cursor = with(|s| s.cursor);
             unsafe { SetCursor(cursor as HANDLE) };
             return 1;
@@ -527,7 +551,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             let dpi = (wparam & 0xffff) as f32;
             let r = unsafe { *(lparam as *const RECT) };
             unsafe { SetWindowPos(hwnd, std::ptr::null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE) };
-            if win == Win::Main {
+            if win == FIRST {
                 let scale = dpi / 96.0;
                 let fixed = with(|s| {
                     s.scale = scale;
@@ -804,7 +828,43 @@ fn release(object: *mut c_void) {
 }
 
 
-/// Shows the main window again (from the notification area) in front.
+/// Creates a search window (hidden), at `place`: a position (None:
+/// Windows chooses) and an outer size; None: all as Windows chooses.
+fn create_main(class: &[u16], title: &[u16], instance: HANDLE, place: Option<(Option<(i32, i32)>, (i32, i32))>) -> io::Result<HWND> {
+    let ((x, y), (w, h)) = match place {
+        Some((at, size)) => (at.unwrap_or((CW_USEDEFAULT, CW_USEDEFAULT)), size),
+        None => ((CW_USEDEFAULT, CW_USEDEFAULT), (CW_USEDEFAULT, CW_USEDEFAULT)),
+    };
+    // SAFETY: a registered class and NUL-terminated strings.
+    let hwnd = unsafe {
+        CreateWindowExW(
+            0,
+            class.as_ptr(),
+            title.as_ptr(),
+            WS_OVERLAPPEDWINDOW,
+            x,
+            y,
+            w,
+            h,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            instance,
+            std::ptr::null_mut(),
+        )
+    };
+    if hwnd.is_null() { Err(io::Error::last_os_error()) } else { Ok(hwnd) }
+}
+
+/// Gives a search window its icons and a title bar matching the theme.
+fn dress(hwnd: HWND, scale: f32) {
+    for (kind, size) in [(1, 48), (0, 16 * (scale.round() as usize).max(1))] {
+        // SAFETY: our window; the icon outlives it (never freed).
+        unsafe { SendMessageW(hwnd, WM_SETICON, kind, make_icon(size) as LPARAM) };
+    }
+    match_title_bar(hwnd, crate::canvas::is_dark());
+}
+
+/// Shows the first window again (from the notification area) in front.
 fn show_main(hwnd: HWND) {
     const SW_SHOW: i32 = 5;
     const SW_RESTORE: i32 = 9;
@@ -839,7 +899,10 @@ pub(crate) fn make_icon(size: usize) -> HANDLE {
 }
 
 pub struct Win32 {
-    main: HWND,
+    /// The search windows by number; null where one was closed.
+    mains: Vec<HWND>,
+    /// The one `select` chose.
+    selected: usize,
     dialog: HWND,
     class: Vec<u16>,
     instance: HANDLE,
@@ -876,23 +939,7 @@ impl Win32 {
             with(|s| s.cursor = arrow as usize);
 
             let title = wide(spec.title);
-            let main = CreateWindowExW(
-                0,
-                class.as_ptr(),
-                title.as_ptr(),
-                WS_OVERLAPPEDWINDOW,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                instance,
-                std::ptr::null_mut(),
-            );
-            if main.is_null() {
-                return Err(io::Error::last_os_error());
-            }
+            let main = create_main(&class, &title, instance, None)?;
             // The monitor the window landed on decides the scale.
             let dpi = match GetDpiForWindow(main) {
                 0 => GetDpiForSystem(),
@@ -901,17 +948,14 @@ impl Win32 {
             let desktop = dpi as f32 / 96.0;
             let scale = spec.scale.unwrap_or(desktop);
             with(|s| {
-                s.main = main as usize;
+                s.mains = vec![main as usize];
                 s.scale = desktop;
                 s.fixed_scale = spec.scale.is_some();
             });
             let mut r = RECT { left: 0, top: 0, right: (spec.width as f32 * scale) as i32, bottom: (spec.height as f32 * scale) as i32 };
             AdjustWindowRectExForDpi(&mut r, WS_OVERLAPPEDWINDOW, 0, 0, dpi);
             SetWindowPos(main, std::ptr::null_mut(), 0, 0, r.right - r.left, r.bottom - r.top, 0x2 | SWP_NOZORDER); // SWP_NOMOVE
-            for (kind, size) in [(1, 48), (0, 16 * (scale.round() as usize).max(1))] {
-                SendMessageW(main, WM_SETICON, kind, make_icon(size) as LPARAM);
-            }
-            match_title_bar(main, crate::canvas::is_dark());
+            dress(main, scale);
             // Started at sign-in: straight to the notification area.
             if spec.hidden {
                 with(|s| s.tray = true);
@@ -921,18 +965,37 @@ impl Win32 {
             }
             let size = client_size(main);
             with(|s| {
-                s.size = size;
-                s.events.push_back(Event::Resize(size.0.max(1), size.1.max(1)));
+                s.sizes = vec![size];
+                s.events.push_back(Event::Resize(FIRST, size.0.max(1), size.1.max(1)));
             });
-            Ok(Win32 { main, dialog: std::ptr::null_mut(), class, instance, cursor: Cursor::Arrow, title_dark: crate::canvas::is_dark() })
+            Ok(Win32 {
+                mains: vec![main],
+                selected: 0,
+                dialog: std::ptr::null_mut(),
+                class,
+                instance,
+                cursor: Cursor::Arrow,
+                title_dark: crate::canvas::is_dark(),
+            })
         }
     }
 
     fn hwnd(&self, win: Win) -> HWND {
         match win {
-            Win::Main => self.main,
+            Win::Main(n) => self.mains.get(n as usize).copied().unwrap_or(std::ptr::null_mut()),
             Win::Dialog => self.dialog,
         }
+    }
+
+    /// The first search window: the notification-area icon, the global
+    /// shortcut and the end of the session go to it.
+    fn first(&self) -> HWND {
+        self.mains[0]
+    }
+
+    /// The selected search window (the first if it was closed).
+    fn cur(&self) -> HWND {
+        self.mains.get(self.selected).copied().filter(|h| !h.is_null()).unwrap_or(self.mains[0])
     }
 
     /// Handles every message waiting in the queue.
@@ -960,9 +1023,9 @@ impl Win32 {
         // SAFETY: our window.
         unsafe {
             ReleaseCapture();
-            SendMessageW(self.main, WM_NCLBUTTONDOWN, hit, 0);
+            SendMessageW(self.cur(), WM_NCLBUTTONDOWN, hit, 0);
         }
-        push(Event::Release { win: Win::Main, button: 1 });
+        push(Event::Release { win: Win::Main(self.selected as u8), button: 1 });
     }
 }
 
@@ -970,11 +1033,13 @@ impl Drop for Win32 {
     fn drop(&mut self) {
         self.close_dialog();
         if with(|s| s.tray) {
-            crate::win_tray::remove(self.main);
+            crate::win_tray::remove(self.first());
         }
-        with(|s| s.main = 0);
-        // SAFETY: our window, destroyed once.
-        unsafe { DestroyWindow(self.main) };
+        with(|s| s.mains.clear());
+        for &w in self.mains.iter().filter(|w| !w.is_null()) {
+            // SAFETY: our windows, destroyed once.
+            unsafe { DestroyWindow(w) };
+        }
     }
 }
 
@@ -1022,7 +1087,7 @@ impl Backend for Win32 {
         let dark = crate::canvas::is_dark();
         if dark != self.title_dark {
             self.title_dark = dark;
-            for w in [self.main, self.dialog].into_iter().filter(|w| !w.is_null()) {
+            for &w in self.mains.iter().chain([&self.dialog]).filter(|w| !w.is_null()) {
                 match_title_bar(w, dark);
             }
         }
@@ -1033,7 +1098,7 @@ impl Backend for Win32 {
             blit(dc, &frame);
             ReleaseDC(hwnd, dc);
         }
-        with(|s| s.frames[win as usize] = Some(frame));
+        with(|s| *frame_of(s, win) = Some(frame));
         Ok(())
     }
 
@@ -1045,37 +1110,106 @@ impl Backend for Win32 {
         const SWP_NOMOVE: u32 = 0x2;
         const SWP_NOZORDER: u32 = 0x4;
         const SWP_FRAMECHANGED: u32 = 0x20;
-        // SAFETY: our window.
-        unsafe { SetWindowPos(self.main, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED) };
+        for &w in self.mains.iter().filter(|w| !w.is_null()) {
+            // SAFETY: our window.
+            unsafe { SetWindowPos(w, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED) };
+        }
         own
     }
 
     fn set_hotkey(&mut self, keys: Option<&str>) -> Result<(), String> {
         const ID: i32 = 1;
         // SAFETY: our window; a hot key id we own.
-        unsafe { UnregisterHotKey(self.main, ID) };
+        unsafe { UnregisterHotKey(self.first(), ID) };
         let Some(keys) = keys else { return Ok(()) };
         let (mods, vk) = hotkey_codes(keys).ok_or_else(|| format!("{keys} cannot be a global shortcut"))?;
         const MOD_NOREPEAT: u32 = 0x4000;
         // SAFETY: as above.
-        if unsafe { RegisterHotKey(self.main, ID, mods | MOD_NOREPEAT, vk) } == 0 {
+        if unsafe { RegisterHotKey(self.first(), ID, mods | MOD_NOREPEAT, vk) } == 0 {
             return Err(format!("{keys} is already taken by another program"));
         }
         Ok(())
     }
 
     fn native_window(&self) -> isize {
-        self.main as isize
+        self.cur() as isize
+    }
+
+    fn open_window(&mut self) -> io::Result<u8> {
+        let n = self.mains.iter().skip(1).position(|w| w.is_null()).map_or(self.mains.len(), |i| i + 1);
+        if n > u8::MAX as usize {
+            return Err(io::Error::other("too many windows"));
+        }
+        // SAFETY (whole block): plain Win32 calls on our windows.
+        unsafe {
+            // As big as the first window, a little below and right of the
+            // newest one shown, as Windows cascades windows.
+            let last = self.mains.iter().rev().find(|w| !w.is_null() && IsWindowVisible(**w) != 0).copied();
+            let mut r = RECT::default();
+            GetWindowRect(last.unwrap_or(self.first()), &mut r);
+            let step = (GetDpiForWindow(self.first()).max(96) as i32) * 30 / 96;
+            let at = last.map(|_| (r.left + step, r.top + step));
+            let mut size = RECT::default();
+            GetWindowRect(self.first(), &mut size);
+            let title = wide(crate::WINDOW_TITLE);
+            let hwnd = create_main(&self.class, &title, self.instance, Some((at, (size.right - size.left, size.bottom - size.top))))?;
+            let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
+            dress(hwnd, scale);
+            with(|s| {
+                if s.mains.len() <= n {
+                    s.mains.resize(n + 1, 0);
+                }
+                s.mains[n] = hwnd as usize;
+                *frame_of(s, Win::Main(n as u8)) = None;
+            });
+            if self.mains.len() <= n {
+                self.mains.resize(n + 1, std::ptr::null_mut());
+            }
+            self.mains[n] = hwnd;
+            ShowWindow(hwnd, SW_SHOW);
+            SetForegroundWindow(hwnd);
+            let size = client_size(hwnd);
+            with(|s| {
+                if s.sizes.len() <= n {
+                    s.sizes.resize(n + 1, (0, 0));
+                }
+                s.sizes[n] = size;
+            });
+            push(Event::Resize(Win::Main(n as u8), size.0.max(1), size.1.max(1)));
+        }
+        Ok(n as u8)
+    }
+
+    fn close_window(&mut self, n: u8) {
+        let n = n as usize;
+        if n == 0 || n >= self.mains.len() || self.mains[n].is_null() {
+            return;
+        }
+        let hwnd = std::mem::replace(&mut self.mains[n], std::ptr::null_mut());
+        with(|s| {
+            s.mains[n] = 0;
+            *frame_of(s, Win::Main(n as u8)) = None;
+        });
+        // SAFETY: our window, destroyed once.
+        unsafe { DestroyWindow(hwnd) };
+    }
+
+    fn select(&mut self, n: u8) {
+        self.selected = n as usize;
+    }
+
+    fn show(&mut self) {
+        show_main(self.first());
     }
 
     fn hide_to_tray(&mut self) -> bool {
         const SW_HIDE: i32 = 0;
         if !with(|s| std::mem::replace(&mut s.tray, true)) {
-            crate::win_tray::add(self.main, tray_icon(self.main));
+            crate::win_tray::add(self.first(), tray_icon(self.first()));
         }
         self.close_dialog();
         // SAFETY: our window.
-        unsafe { ShowWindow(self.main, SW_HIDE) };
+        unsafe { ShowWindow(self.first(), SW_HIDE) };
         true
     }
 
@@ -1111,16 +1245,17 @@ impl Backend for Win32 {
 
     fn minimize(&mut self) {
         // SAFETY: our window.
-        unsafe { ShowWindow(self.main, SW_MINIMIZE) };
+        unsafe { ShowWindow(self.cur(), SW_MINIMIZE) };
     }
 
     fn toggle_maximize(&mut self) {
+        let w = self.cur();
         // SAFETY: our window.
-        unsafe { ShowWindow(self.main, if IsZoomed(self.main) != 0 { SW_RESTORE } else { SW_MAXIMIZE }) };
+        unsafe { ShowWindow(w, if IsZoomed(w) != 0 { SW_RESTORE } else { SW_MAXIMIZE }) };
     }
 
     fn copy(&mut self, text: &str, file: bool) -> bool {
-        if !open_clipboard(self.main) {
+        if !open_clipboard(self.cur()) {
             return false;
         }
         let mut ok = true;
@@ -1152,7 +1287,7 @@ impl Backend for Win32 {
     }
 
     fn request_paste(&mut self) {
-        if let Some(text) = clipboard_text(self.main) {
+        if let Some(text) = clipboard_text(self.cur()) {
             push(Event::Paste(text));
         }
     }
@@ -1166,13 +1301,14 @@ impl Backend for Win32 {
         let style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
         // SAFETY (whole block): plain Win32 calls on our windows.
         unsafe {
-            let dpi = GetDpiForWindow(self.main).max(96);
+            let owner = self.cur();
+            let dpi = GetDpiForWindow(owner).max(96);
             let mut r = RECT { left: 0, top: 0, right: w, bottom: h };
             AdjustWindowRectExForDpi(&mut r, style, 0, WS_EX_DLGMODALFRAME, dpi);
             let (ow, oh) = (r.right - r.left, r.bottom - r.top);
             // Centred over the main window.
             let mut m = RECT::default();
-            GetWindowRect(self.main, &mut m);
+            GetWindowRect(owner, &mut m);
             let (x, y) = (m.left + (m.right - m.left - ow) / 2, m.top + (m.bottom - m.top - oh) / 3);
             let title = wide(title);
             let dialog = CreateWindowExW(
@@ -1184,7 +1320,7 @@ impl Backend for Win32 {
                 y.max(m.top),
                 ow,
                 oh,
-                self.main, // owned: stays above it, minimized with it
+                owner, // owned: stays above it, minimized with it
                 std::ptr::null_mut(),
                 self.instance,
                 std::ptr::null_mut(),
@@ -1195,10 +1331,12 @@ impl Backend for Win32 {
             self.dialog = dialog;
             with(|s| {
                 s.dialog = dialog as usize;
-                s.frames[1] = None;
+                s.dialog_frame = None;
             });
-            // Modal: the main window takes no input while it is open.
-            EnableWindow(self.main, 0);
+            // Modal: the search windows take no input while it is open.
+            for &w in self.mains.iter().filter(|w| !w.is_null()) {
+                EnableWindow(w, 0);
+            }
             match_title_bar(dialog, crate::canvas::is_dark());
             ShowWindow(dialog, SW_SHOW);
             SetForegroundWindow(dialog);
@@ -1213,14 +1351,16 @@ impl Backend for Win32 {
         // SAFETY: our windows. Re-enabling first lets activation return
         // to the main window rather than to another program.
         unsafe {
-            EnableWindow(self.main, 1);
+            for &w in self.mains.iter().filter(|w| !w.is_null()) {
+                EnableWindow(w, 1);
+            }
             ShowWindow(self.dialog, SW_HIDE);
             DestroyWindow(self.dialog);
         }
         self.dialog = std::ptr::null_mut();
         with(|s| {
             s.dialog = 0;
-            s.frames[1] = None;
+            s.dialog_frame = None;
         });
     }
 
@@ -1238,7 +1378,7 @@ impl Backend for Win32 {
         // the button is released. A null source uses the default one.
         let hr = unsafe {
             ReleaseCapture();
-            SHDoDragDrop(self.main, object, std::ptr::null_mut(), allowed, &mut effect)
+            SHDoDragDrop(self.cur(), object, std::ptr::null_mut(), allowed, &mut effect)
         };
         release(object);
         if hr == DRAGDROP_S_DROP {
@@ -1249,7 +1389,7 @@ impl Backend for Win32 {
             push(Event::DragFinished);
         }
         push(Event::DragEnded);
-        push(Event::Release { win: Win::Main, button: 1 });
+        push(Event::Release { win: Win::Main(self.selected as u8), button: 1 });
         Ok(())
     }
 

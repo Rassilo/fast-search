@@ -8,13 +8,19 @@ use std::time::Duration;
 use crate::canvas::Canvas;
 pub use crate::keys::Key;
 
-/// One of our two windows.
+/// One of our windows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Win {
-    Main,
+    /// A search window. Number 0 is always there (hidden while closed to
+    /// the notification area); more are opened by the global shortcut,
+    /// each with its own search, as in Everything.
+    Main(u8),
     /// The modal dialog (confirmations, help, options); at most one.
     Dialog,
 }
+
+/// The first search window, which stays (hidden) while the program runs.
+pub const FIRST: Win = Win::Main(0);
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Mods {
@@ -39,8 +45,8 @@ pub enum Cursor {
 pub enum Event {
     /// The window's content was lost or never shown: draw it again.
     Redraw(Win),
-    /// The main window now has this size in pixels.
-    Resize(usize, usize),
+    /// A search window now has this size in pixels.
+    Resize(Win, usize, usize),
     /// The user asked to close the window.
     Close(Win),
     Key { win: Win, key: Key, mods: Mods },
@@ -62,9 +68,11 @@ pub enum Event {
     DragFinished,
     /// The drag is over (after a drop, or released over nothing).
     DragEnded,
-    /// The main window was shown again, from the notification area or
-    /// by a second start of the program.
+    /// The first window was shown again, from the notification area.
     Shown,
+    /// The global shortcut was pressed, or the program started again:
+    /// show the first window if it is hidden, else open another one.
+    Summoned,
     /// Exit, chosen outside the window (the notification-area menu).
     Quit,
     /// The desktop's scale for our window became known or changed.
@@ -90,15 +98,28 @@ pub trait Backend {
     /// Returns what is in effect: a desktop that draws no title bars
     /// leaves it to us whatever was asked.
     fn set_own_title_bar(&mut self, own: bool) -> bool;
-    /// Shows the main window again, in front, after `hide_to_tray`.
-    /// The main window's system handle (Windows: its HWND), for dialogs
+    /// Opens another search window like the first, in front; returns its
+    /// number. It arrives with a `Resize`.
+    fn open_window(&mut self) -> io::Result<u8> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "one window only"))
+    }
+
+    /// Closes search window `n` (not the first, which only hides).
+    fn close_window(&mut self, _n: u8) {}
+
+    /// The search window the calls without a window of their own act on
+    /// (moving, resizing, cursor, minimize, clipboard owner, drag source,
+    /// dialog owner).
+    fn select(&mut self, _n: u8) {}
+
+    /// The selected window's system handle (Windows: its HWND), for dialogs
     /// the system shows on its behalf; 0 where there is none.
     #[cfg_attr(not(windows), allow(dead_code))]
     fn native_window(&self) -> isize {
         0
     }
 
-    #[cfg_attr(windows, allow(dead_code))] // Windows shows on a window message
+    /// Shows the first window again, in front, after `hide_to_tray`.
     fn show(&mut self) {}
 
     /// Makes `keys` (as in "Ctrl+Alt+F") show the main window from anywhere
@@ -108,7 +129,7 @@ pub trait Backend {
         Ok(())
     }
 
-    /// Hides the main window to the notification area instead of closing
+    /// Hides the first window to the notification area instead of closing
     /// it (Windows), or just out of sight (elsewhere: there is no common
     /// tray); false if it cannot (then close).
     fn hide_to_tray(&mut self) -> bool {
