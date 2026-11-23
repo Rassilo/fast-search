@@ -1139,10 +1139,10 @@ impl App {
             // While indexing, wake often to move the progress along.
             // Hidden (Linux), wake often to answer another start quickly.
             // Shown and following the drives, wake often so changes show
-            // at once.
+            // at once; also while catching up, to keep the checks fed.
             let idle = if self.building.is_some() || self.deleting.is_some() || self.icons.loading() || (self.hidden && cfg!(unix)) {
                 Duration::from_millis(150)
-            } else if self.follow.is_some() && !self.hidden {
+            } else if self.follow.as_ref().is_some_and(|f| !self.hidden || f.catching_up()) {
                 Duration::from_millis(250)
             } else {
                 Duration::from_secs(1)

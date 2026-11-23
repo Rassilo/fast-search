@@ -1,9 +1,11 @@
 //! Keeping the window's own index current as files change, when no ffd
 //! daemon does it: the drives it covers are watched (see
 //! `ff_core::watch`), and what changed is patched into the index in place,
-//! so results show new, renamed and deleted files within a moment. The
-//! index file is saved again once things are quiet and the window is
-//! hidden, and when the program ends.
+//! so results show new, renamed and deleted files within a moment. What
+//! changed while the program was not running is caught up with in the
+//! background at start (`ff_core::live::CatchUp`). The index file is saved
+//! again once things are quiet and the window is hidden, and when the
+//! program ends.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -11,7 +13,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use ff_core::Index;
-use ff_core::live::Tracker;
+use ff_core::live::{CatchUp, Tracker};
 use ff_core::watch::{Event, Watcher};
 
 pub struct Follow {
@@ -23,6 +25,9 @@ pub struct Follow {
     pending: HashSet<(Vec<u8>, Vec<u8>)>,
     /// Built on first use, and again after the index is replaced.
     tracker: Option<Tracker>,
+    /// Checking every folder for changes made while nothing watched.
+    catch_up: Option<CatchUp>,
+    catch_up_started: Instant,
     /// The folder of the index file: our own writes there are not news.
     own: Vec<u8>,
     last_apply: Instant,
@@ -74,6 +79,8 @@ impl Follow {
             rx,
             pending: HashSet::new(),
             tracker: None,
+            catch_up: Some(CatchUp::new(index)),
+            catch_up_started: Instant::now(),
             own,
             last_apply: Instant::now(),
             last_change: Instant::now(),
@@ -94,6 +101,8 @@ impl Follow {
     /// applying them again is harmless.
     pub fn replaced(&mut self) {
         self.tracker = None;
+        // A new index is current: nothing to catch up with.
+        self.catch_up = None;
         self.unsaved = false;
     }
 
@@ -119,13 +128,44 @@ impl Follow {
             self.pending.clear();
             return Found::Rebuild;
         }
+        let mut caught = false;
+        if let Some(c) = &mut self.catch_up {
+            let found = c.step(index);
+            let done = c.done();
+            if !found.is_empty() {
+                let tracker = self.tracker.get_or_insert_with(|| Tracker::new(index));
+                caught = tracker.refresh(index, &found);
+                crate::debug::log(format!("follow: catch-up: {} folders changed, index changed: {caught}", found.len()));
+                if caught {
+                    self.mark_changed();
+                }
+            }
+            if done {
+                crate::debug::log(format!("follow: catch-up done in {:?}", self.catch_up_started.elapsed()));
+                self.catch_up = None;
+            }
+        }
         let every = if eager { Duration::ZERO } else { Duration::from_secs(3) };
         if self.pending.is_empty() || self.last_apply.elapsed() < every {
-            return Found::Nothing;
+            return if caught { Found::Changed } else { Found::Nothing };
         }
         self.last_apply = Instant::now();
         let changes = std::mem::take(&mut self.pending);
-        if self.apply(index, &changes) { Found::Changed } else { Found::Nothing }
+        if self.apply(index, &changes) || caught { Found::Changed } else { Found::Nothing }
+    }
+
+    /// True while folders are still being checked for changes made while
+    /// nothing watched.
+    pub fn catching_up(&self) -> bool {
+        self.catch_up.is_some()
+    }
+
+    fn mark_changed(&mut self) {
+        if !self.unsaved {
+            self.unsaved_since = Instant::now();
+        }
+        self.unsaved = true;
+        self.last_change = Instant::now();
     }
 
     /// Patches `index` for changes at these (directory, name) pairs.
@@ -134,11 +174,7 @@ impl Follow {
         let tracker = self.tracker.get_or_insert_with(|| Tracker::new(index));
         let changed = tracker.apply(index, changes);
         if changed {
-            if !self.unsaved {
-                self.unsaved_since = Instant::now();
-            }
-            self.unsaved = true;
-            self.last_change = Instant::now();
+            self.mark_changed();
         }
         crate::debug::log(format!("follow: {} changes, index changed: {changed}, {:?}", changes.len(), start.elapsed()));
         if crate::debug::enabled() {

@@ -183,6 +183,36 @@ pub fn atime(md: &fs::Metadata) -> i64 {
     }
 }
 
+/// The modification time of `path` (as [`mtime`] gives it), cheaply: on
+/// Windows without opening it (`GetFileAttributesExW`), which matters when
+/// checking every folder of a drive. None if it is not there.
+pub fn quick_mtime(path: &Path) -> Option<i64> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetFileAttributesExW(name: *const u16, level: i32, info: *mut u8) -> i32;
+        }
+        let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // WIN32_FILE_ATTRIBUTE_DATA: attributes, then three FILETIMEs (pairs
+        // of u32, so read through bytes), the last write at offset 20.
+        let mut raw = [0u8; 36];
+        // SAFETY: a NUL-terminated name and a buffer of the struct's size.
+        if unsafe { GetFileAttributesExW(name.as_ptr(), 0, raw.as_mut_ptr()) } == 0 {
+            return None;
+        }
+        let ticks = u64::from_le_bytes(raw[20..28].try_into().ok()?) as i64;
+        // 100 ns units since 1601, to seconds since 1970 (floored, as
+        // `mtime` does).
+        Some(ticks.div_euclid(10_000_000) - 11_644_473_600)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::symlink_metadata(path).ok().map(|m| mtime(&m))
+    }
+}
+
 #[allow(dead_code)]
 fn system_secs(t: std::io::Result<std::time::SystemTime>) -> i64 {
     match t {

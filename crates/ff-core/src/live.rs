@@ -196,6 +196,38 @@ impl Tracker {
         changed
     }
 
+    /// Re-reads whole directories (found changed by [`CatchUp`], with their
+    /// modification time now): every name in them now, and every name the
+    /// index has for them. Returns true if the index changed.
+    pub fn refresh(&mut self, index: &mut Index, dirs: &[(u32, i64)]) -> bool {
+        let mut changes = HashSet::new();
+        let mut paths: HashMap<u32, Vec<u8>> = HashMap::new();
+        for &(id, mtime) in dirs {
+            if index.flags[id as usize] != FLAG_DIR {
+                continue; // gone since, or not a plain directory
+            }
+            let mut path = Vec::new();
+            index.write_path(id, &mut path);
+            // Seen as it is now: not found changed again.
+            index.set_meta(id, index.size[id as usize], mtime);
+            if let Ok(rd) = fs::read_dir(crate::os::path_from_bytes(&path)) {
+                for entry in rd.flatten() {
+                    changes.insert((path.clone(), crate::os::bytes(&entry.file_name()).to_vec()));
+                }
+            }
+            paths.insert(id, path);
+        }
+        if paths.is_empty() {
+            return false;
+        }
+        for id in 0..index.len() as u32 {
+            if let Some(path) = paths.get(&index.parent[id as usize]).filter(|_| !index.is_gone(id)) {
+                changes.insert((path.clone(), index.name(id).to_vec()));
+            }
+        }
+        self.apply(index, &changes)
+    }
+
     /// Adds an entry and, for a directory, everything inside it.
     fn add_tree(&mut self, index: &mut Index, path: Vec<u8>, parent: u32, name: &[u8], md: &fs::Metadata) {
         let flags = type_flags(md.file_type());
@@ -223,6 +255,114 @@ impl Tracker {
                 }
             }
         }
+    }
+}
+
+/// Catching up with what changed while nothing was watching (the program
+/// was not running): every directory whose modification time differs
+/// from the index's is re-read. A directory's time changes when entries
+/// are added to it, removed or renamed, so this finds those without
+/// listing every directory. (A file rewritten in place keeps its folder's
+/// time; its new size shows at its next change.)
+///
+/// The times are read on threads of their own, one per root (each drive
+/// at its own pace, in index order, which follows the disk's), so the
+/// caller never waits on the disk; the caller builds the paths and
+/// applies the results with [`Tracker::refresh`].
+pub struct CatchUp {
+    next: u32,
+    end: u32,
+    /// Per root: its thread's queue, the chunk being gathered, and whether
+    /// the thread is at work.
+    workers: HashMap<u32, Worker>,
+    rx: std::sync::mpsc::Receiver<(u32, Vec<(u32, i64)>)>,
+    done_tx: std::sync::mpsc::Sender<(u32, Vec<(u32, i64)>)>,
+    /// The root each directory seen so far is under.
+    root_of: HashMap<u32, u32>,
+}
+
+struct Worker {
+    tx: std::sync::mpsc::Sender<Vec<(u32, std::path::PathBuf, i64)>>,
+    gathered: Vec<(u32, std::path::PathBuf, i64)>,
+    busy: bool,
+}
+
+/// Directories checked per chunk, and entries looked at per step.
+const CHUNK: usize = 20_000;
+const SCAN: u32 = 400_000;
+
+impl CatchUp {
+    pub fn new(index: &Index) -> CatchUp {
+        let (done_tx, rx) = std::sync::mpsc::channel();
+        CatchUp { next: 0, end: index.len() as u32, workers: HashMap::new(), rx, done_tx, root_of: HashMap::new() }
+    }
+
+    fn worker(&mut self, root: u32) -> &mut Worker {
+        let done = self.done_tx.clone();
+        self.workers.entry(root).or_insert_with(|| {
+            let (tx, jobs) = std::sync::mpsc::channel::<Vec<(u32, std::path::PathBuf, i64)>>();
+            std::thread::spawn(move || {
+                for chunk in jobs {
+                    let changed: Vec<(u32, i64)> = chunk
+                        .into_iter()
+                        .filter_map(|(id, path, old)| crate::os::quick_mtime(&path).filter(|&now| now != old).map(|now| (id, now)))
+                        .collect();
+                    if done.send((root, changed)).is_err() {
+                        return;
+                    }
+                }
+            });
+            Worker { tx, gathered: Vec::new(), busy: false }
+        })
+    }
+
+    /// Takes in what the threads found (directories changed, with their
+    /// time now), and gives free threads their next chunk.
+    pub fn step(&mut self, index: &Index) -> Vec<(u32, i64)> {
+        let mut found = Vec::new();
+        for (root, changed) in self.rx.try_iter() {
+            if let Some(w) = self.workers.get_mut(&root) {
+                w.busy = false;
+            }
+            found.extend(changed);
+        }
+        // Gather more, unless a busy thread already has plenty waiting.
+        let mut path = Vec::new();
+        let stop = self.next.saturating_add(SCAN).min(self.end);
+        while self.next < stop && !self.workers.values().any(|w| w.gathered.len() >= 4 * CHUNK) {
+            let id = self.next;
+            self.next += 1;
+            if index.flags[id as usize] != FLAG_DIR {
+                continue;
+            }
+            let root = match index.parent[id as usize] {
+                NO_PARENT => id,
+                p => match self.root_of.get(&p) {
+                    Some(&r) => r,
+                    None => continue, // under a gone or other kind of entry
+                },
+            };
+            self.root_of.insert(id, root);
+            index.write_path(id, &mut path);
+            let mtime = index.mtime[id as usize];
+            self.worker(root).gathered.push((id, crate::os::path_from_bytes(&path).to_path_buf(), mtime));
+        }
+        if self.next >= self.end {
+            self.root_of = HashMap::new();
+        }
+        for w in self.workers.values_mut() {
+            if !w.busy && !w.gathered.is_empty() {
+                let take = w.gathered.len().min(CHUNK);
+                let chunk: Vec<_> = w.gathered.drain(..take).collect();
+                w.busy = w.tx.send(chunk).is_ok();
+            }
+        }
+        found
+    }
+
+    /// True once every directory was checked and its result taken.
+    pub fn done(&self) -> bool {
+        self.next >= self.end && self.workers.values().all(|w| !w.busy && w.gathered.is_empty())
     }
 }
 
@@ -331,6 +471,36 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    /// Changes made while nothing watched are found by folder times.
+    #[test]
+    fn catches_up_with_changes_made_meanwhile() {
+        let root = std::env::temp_dir().join(format!("ff_catch_up_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("a/quiet")).unwrap();
+        fs::write(root.join("a/old.txt"), "1").unwrap();
+        let root = crate::os::canonicalize(&root).unwrap();
+        let mut index = Index::build(&BuildOptions::new([&root])).unwrap();
+        // Folder times count in seconds.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        fs::write(root.join("a/new.txt"), "2").unwrap();
+        fs::remove_file(root.join("a/old.txt")).unwrap();
+        let mut tracker = Tracker::new(&index);
+        let mut catch_up = CatchUp::new(&index);
+        let mut changed = Vec::new();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !catch_up.done() && std::time::Instant::now() < end {
+            changed.extend(catch_up.step(&index));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(catch_up.done());
+        // Only the folder that changed is read again.
+        assert_eq!(changed.len(), 1);
+        assert!(tracker.refresh(&mut index, &changed));
+        let find = |index: &Index, q: &str| index.search(&Query::parse(q), &SearchOptions::default()).len();
+        assert_eq!((find(&index, "new.txt"), find(&index, "old.txt"), find(&index, "quiet")), (1, 0, 1));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     /// Patching in place (the window's way): ids stay valid, removed
     /// entries are marked gone, and a folder made again is found again.
     #[test]
@@ -388,4 +558,17 @@ fn tracker_timing() {
     let t = std::time::Instant::now();
     let changed = tracker.apply(&mut index, &change);
     eprintln!("apply its removal: {changed} in {:?}", t.elapsed());
+    let t = std::time::Instant::now();
+    let mut catch_up = CatchUp::new(&index);
+    let (mut stale, mut changed, mut refresh_time) = (0, false, std::time::Duration::ZERO);
+    while !catch_up.done() {
+        let found = catch_up.step(&index);
+        stale += found.len();
+        let r = std::time::Instant::now();
+        changed |= tracker.refresh(&mut index, &found);
+        refresh_time += r.elapsed();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    eprintln!("catch-up: {stale} folders changed, index changed: {changed}, {:?} ({refresh_time:?} refreshing)", t.elapsed());
 }
+

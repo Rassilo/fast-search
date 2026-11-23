@@ -398,7 +398,11 @@ Without the daemon, the window follows the disk by itself while it runs
 (which, kept in the notification area, is from sign-in): it watches the
 indexed drives (`ReadDirectoryChangesW` on Windows, inotify on Linux)
 and patches its index in place, so new, renamed and deleted files show
-within a moment. It writes the index file back once changes stop for
+within a moment. At start it catches up with what changed while it was
+not running: every folder whose modification time differs from the
+index's is read again, checked in the background, one thread per drive
+(about three minutes for 1.7 million folders on an SSD and three hard
+disks). It writes the index file back once changes stop for
 30 seconds while it is hidden (at most hourly while files keep changing,
 since the file is large) and when it quits; `ff` on the command line
 reads that file. With the daemon, the index file itself follows the
