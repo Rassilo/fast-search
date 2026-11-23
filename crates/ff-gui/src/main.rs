@@ -525,6 +525,9 @@ struct App {
     tree: Option<tree::Tree>,
     /// The tiles of its map as last drawn, and the one under the pointer.
     tiles: Vec<tree::Tile>,
+    /// Per root of the folder sizes tree: its drive's capacity and free
+    /// space, where known.
+    disks: Vec<(u32, (u64, u64))>,
     tile_hover: Option<u32>,
     /// The list of completions open under the search box.
     complete: Option<complete::Complete>,
@@ -858,6 +861,7 @@ impl App {
             building: None,
             tree: None,
             tiles: Vec::new(),
+            disks: Vec::new(),
             tile_hover: None,
             complete: None,
             bookmarks: ff_core::bookmarks::load(),

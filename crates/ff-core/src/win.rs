@@ -69,6 +69,7 @@ unsafe extern "system" {
     fn GetLogicalDrives() -> u32;
     fn GetDriveTypeW(root: *const u16) -> u32;
     fn GetDynamicTimeZoneInformation(info: *mut DYNAMIC_TIME_ZONE_INFORMATION) -> u32;
+    fn GetDiskFreeSpaceExW(dir: *const u16, free_to_caller: *mut u64, total: *mut u64, free: *mut u64) -> BOOL;
     fn GetVolumePathNameW(path: *const u16, out: *mut u16, len: u32) -> BOOL;
     fn GetVolumeNameForVolumeMountPointW(mount: *const u16, out: *mut u16, len: u32) -> BOOL;
     fn GetFileInformationByHandle(file: *mut c_void, info: *mut BY_HANDLE_FILE_INFORMATION) -> BOOL;
@@ -268,4 +269,13 @@ pub fn attribute_names(attrs: u32) -> String {
     ];
     let set: Vec<&str> = names.iter().filter(|(bit, _)| attrs & bit != 0).map(|&(_, n)| n).collect();
     if set.is_empty() { "normal".into() } else { set.join(", ") }
+}
+
+/// The capacity and free space, in bytes, of the drive `dir` is on.
+pub(crate) fn disk_space(dir: &Path) -> Option<(u64, u64)> {
+    let dir = crate::os::wide(dir.as_os_str());
+    let (mut avail, mut total, mut free) = (0u64, 0u64, 0u64);
+    // SAFETY: a NUL-terminated path and three output values.
+    let ok = unsafe { GetDiskFreeSpaceExW(dir.as_ptr(), &mut avail, &mut total, &mut free) };
+    (ok != 0 && total > 0).then_some((total, free))
 }

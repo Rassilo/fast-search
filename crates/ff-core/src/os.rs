@@ -311,6 +311,39 @@ pub fn data_dir() -> Option<PathBuf> {
     }
 }
 
+/// The capacity and free space, in bytes, of the filesystem `path` is on
+/// (free: all unused space, so that used = capacity - free). None where
+/// unknown.
+pub fn disk_space(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(windows)]
+    {
+        crate::win::disk_space(path)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        // struct statvfs on 64-bit Linux (glibc and musl): eleven 8-byte
+        // fields, then spare room; f_frsize, f_blocks and f_bfree are the
+        // 2nd, 3rd and 4th.
+        unsafe extern "C" {
+            fn statvfs(path: *const std::ffi::c_char, buf: *mut u64) -> i32;
+        }
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut buf = [0u64; 16];
+        // SAFETY: a NUL-terminated path and a buffer larger than the struct.
+        if unsafe { statvfs(c.as_ptr(), buf.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        let (frsize, blocks, free) = (buf[1], buf[2], buf[3]);
+        (blocks > 0).then(|| (blocks * frsize, free * frsize))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// Reads exactly `buf.len()` bytes at `offset`. On Windows the read is
 /// widened to whole 4 KiB blocks, which raw volumes (`\\.\D:`) require.
 pub fn read_exact_at(file: &fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {

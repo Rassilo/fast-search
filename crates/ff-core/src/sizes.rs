@@ -131,11 +131,6 @@ impl Tree {
         self.newest[id as usize]
     }
 
-    /// Everything indexed: the sizes of all the roots together.
-    pub fn grand_total(&self) -> u64 {
-        self.roots.iter().map(|&r| self.total[r as usize]).sum()
-    }
-
     pub fn files(&self, id: u32) -> u32 {
         self.files[id as usize]
     }
