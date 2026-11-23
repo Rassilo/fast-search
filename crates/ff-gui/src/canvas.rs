@@ -21,7 +21,6 @@ pub fn set_theme(index: usize) {
 }
 
 /// True if the current theme is dark.
-#[cfg_attr(not(windows), allow(dead_code))]
 pub fn is_dark() -> bool {
     theme().dark
 }
@@ -696,6 +695,10 @@ pub struct Icons {
     /// Elsewhere: the desktop's icon theme, read on first use.
     #[cfg(not(windows))]
     themes: Option<crate::linux_icons::Themes>,
+    /// Elsewhere: the text, background and accent colours the theme's
+    /// icons were drawn in (KDE's monochrome icons take them).
+    #[cfg(not(windows))]
+    scheme: [u32; 3],
     /// Windows: icons of files that carry their own (programs, shortcuts),
     /// by path, read in the background; asked for but not in yet: absent.
     #[cfg(windows)]
@@ -714,6 +717,8 @@ impl Icons {
             system: HashMap::new(),
             #[cfg(not(windows))]
             themes: None,
+            #[cfg(not(windows))]
+            scheme: [0; 3],
             #[cfg(windows)]
             own: HashMap::new(),
             #[cfg(windows)]
@@ -802,7 +807,15 @@ impl Icons {
         #[cfg(not(windows))]
         if system {
             let size = self.size;
-            let themes = self.themes.get_or_insert_with(crate::linux_icons::Themes::load);
+            // Icons drawn for another theme are drawn again.
+            let scheme = [tone(palette::INK), tone(palette::CARD), tone(ACCENT)];
+            if self.scheme != scheme {
+                self.scheme = scheme;
+                self.system.clear();
+                // A dark window takes the theme's dark variant.
+                self.themes = None;
+            }
+            let themes = self.themes.get_or_insert_with(|| crate::linux_icons::Themes::load(is_dark()));
             if themes.usable() {
                 let key = if drive {
                     "<drive>".to_string()
@@ -813,7 +826,7 @@ impl Icons {
                     let name = String::from_utf8_lossy(name).to_ascii_lowercase();
                     name.split_once('.').map_or(String::new(), |(_, ext)| ext.to_string())
                 };
-                let image = self.system.entry(key).or_insert_with(|| themes.icon(name, is_dir, drive, size));
+                let image = self.system.entry(key).or_insert_with(|| themes.icon(name, is_dir, drive, size, scheme));
                 if let Some(image) = image {
                     return blit(cv, x, y, size, image);
                 }

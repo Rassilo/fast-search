@@ -119,7 +119,7 @@ pub fn windows_resource() -> Vec<u8> {
 // ---- PNG ---------------------------------------------------------------------
 
 /// Encodes BGRA pixels as an RGBA PNG.
-fn png(size: usize, pixels: &[[u8; 4]]) -> Vec<u8> {
+pub(crate) fn png(size: usize, pixels: &[[u8; 4]]) -> Vec<u8> {
     let mut raw = Vec::with_capacity(size * (size * 4 + 1));
     for row in pixels.chunks_exact(size) {
         raw.push(0); // no filter

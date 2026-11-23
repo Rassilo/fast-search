@@ -22,6 +22,8 @@ mod saved;
 mod settings;
 #[cfg(windows)]
 mod shell_icons;
+#[cfg(not(windows))]
+mod svg;
 mod tree;
 #[cfg(not(windows))]
 mod wayland;
