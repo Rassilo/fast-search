@@ -178,6 +178,8 @@ unsafe extern "system" {
     fn SetForegroundWindow(hwnd: HWND) -> BOOL;
     fn IsZoomed(hwnd: HWND) -> BOOL;
     fn IsIconic(hwnd: HWND) -> BOOL;
+    fn RegisterHotKey(hwnd: HWND, id: i32, mods: u32, vk: u32) -> BOOL;
+    fn UnregisterHotKey(hwnd: HWND, id: i32) -> BOOL;
     fn GetSystemMetricsForDpi(index: i32, dpi: u32) -> i32;
     fn CreateIconIndirect(info: *const ICONINFO) -> HANDLE;
 }
@@ -283,6 +285,7 @@ const WM_MOUSEWHEEL: u32 = 0x020A;
 const WM_DPICHANGED: u32 = 0x02E0;
 const WM_NCCALCSIZE: u32 = 0x0083;
 const WM_QUERYENDSESSION: u32 = 0x0011;
+const WM_HOTKEY: u32 = 0x0312;
 const WM_ENDSESSION: u32 = 0x0016;
 
 const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
@@ -456,6 +459,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         // Logging off, or an installer closing us to replace our files
         // (Restart Manager): really exit, even when closing only hides.
         WM_QUERYENDSESSION => return 1,
+        // The global shortcut.
+        WM_HOTKEY if win == Win::Main => show_main(hwnd),
         WM_ENDSESSION if win == Win::Main && wparam != 0 => push(Event::Quit),
         WM_DESTROY => {}
         WM_ERASEBKGND => return 1, // every pixel is painted by us
@@ -1045,6 +1050,20 @@ impl Backend for Win32 {
         own
     }
 
+    fn set_hotkey(&mut self, keys: Option<&str>) -> Result<(), String> {
+        const ID: i32 = 1;
+        // SAFETY: our window; a hot key id we own.
+        unsafe { UnregisterHotKey(self.main, ID) };
+        let Some(keys) = keys else { return Ok(()) };
+        let (mods, vk) = hotkey_codes(keys).ok_or_else(|| format!("{keys} cannot be a global shortcut"))?;
+        const MOD_NOREPEAT: u32 = 0x4000;
+        // SAFETY: as above.
+        if unsafe { RegisterHotKey(self.main, ID, mods | MOD_NOREPEAT, vk) } == 0 {
+            return Err(format!("{keys} is already taken by another program"));
+        }
+        Ok(())
+    }
+
     fn hide_to_tray(&mut self) -> bool {
         const SW_HIDE: i32 = 0;
         if !with(|s| std::mem::replace(&mut s.tray, true)) {
@@ -1292,4 +1311,31 @@ mod tests {
         assert_eq!(special_key(0x73, false, false), Some(K_F4));
         assert_eq!(special_key(0x41, false, false), None);
     }
+}
+
+/// "Ctrl+Alt+F" as RegisterHotKey's modifiers and virtual key.
+fn hotkey_codes(keys: &str) -> Option<(u32, u32)> {
+    const MOD_ALT: u32 = 0x1;
+    const MOD_CONTROL: u32 = 0x2;
+    const MOD_SHIFT: u32 = 0x4;
+    const MOD_WIN: u32 = 0x8;
+    let mut parts: Vec<&str> = keys.split('+').map(str::trim).collect();
+    let key = parts.pop()?;
+    let mut mods = 0;
+    for part in parts {
+        mods |= match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => MOD_CONTROL,
+            "alt" => MOD_ALT,
+            "shift" => MOD_SHIFT,
+            "super" | "win" | "windows" => MOD_WIN,
+            _ => return None,
+        };
+    }
+    let upper = key.to_ascii_uppercase();
+    let vk = match upper.as_str() {
+        "SPACE" => 0x20,
+        k if k.len() == 1 && k.as_bytes()[0].is_ascii_alphanumeric() => k.as_bytes()[0] as u32,
+        k => 0x70 + k.strip_prefix('F')?.parse::<u32>().ok().filter(|n| (1..=24).contains(n))? - 1,
+    };
+    Some((mods, vk))
 }

@@ -510,8 +510,11 @@ What differs from Linux:
   borders; *Options → Menus in the title bar* turns it off), text is
   drawn with ClearType in Segoe UI, the accent colour is the desktop's,
   and it follows the Windows dark mode setting. Results can be dragged
-  to Explorer and copied as files. The global shortcut is a hotkey on a
-  Start-menu shortcut, so it needs Ctrl+Alt (default Ctrl+Alt+F).
+  to Explorer and copied as files. The global shortcut (default
+  Ctrl+Alt+F; set it in *Options → Desktop* by pressing the keys, such as
+  Alt+Q) is registered by the running window, so it works while Fast
+  search runs, which it does from sign-in; if another program holds the
+  keys, Options says so. Column widths follow dragging the header edges.
   Closing the window (its X, Alt+F4, or Esc on an empty search) hides it
   to the notification area, index loaded: the shortcut, or starting
   `ff-gui` again, shows it at once. *File → Quit*, Ctrl+Q or the tray

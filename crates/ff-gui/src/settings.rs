@@ -616,79 +616,58 @@ pub fn launcher_installed() -> bool {
     start_menu_link().is_ok_and(|l| l.exists())
 }
 
-/// Adds "Fast search" to the Start menu (keeping the hot key, if any).
+/// Adds "Fast search" to the Start menu.
 #[cfg(windows)]
 pub fn install_launcher() -> io::Result<PathBuf> {
     let link = start_menu_link()?;
-    let hotkey = current_shortcut().map(|k| windows_hotkey(&k)).transpose().map_err(other)?.unwrap_or_default();
-    winsys::write_shortcut(&link, &launch_path()?, &hotkey)?;
+    winsys::write_shortcut(&link, &launch_path()?, "")?;
     Ok(link)
 }
 
+/// Removing the menu entry no longer touches the global shortcut, which
+/// the running program registers itself.
 #[cfg(windows)]
 pub fn remove_launcher() -> io::Result<()> {
-    let _ = shortcut_state().and_then(fs::remove_file);
     match fs::remove_file(start_menu_link()?) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
 }
 
-/// The keys used until the user chooses others. Windows hot keys need
-/// Ctrl and Alt together.
+/// The keys used until the user chooses others.
 #[cfg(windows)]
 pub const DEFAULT_SHORTCUT: &str = "Ctrl+Alt+F";
 
-/// "Ctrl+Alt+F" as a shell link hot key ("CTRL+ALT+F").
-#[cfg(windows)]
-fn windows_hotkey(label: &str) -> Result<String, String> {
-    let parts: Vec<&str> = label.split('+').collect();
-    let (key, mods) = parts.split_last().ok_or("no key given")?;
-    if mods.contains(&"Super") {
-        return Err("Windows shortcuts cannot use the Windows key; use Ctrl+Alt, such as Ctrl+Alt+F".into());
-    }
-    if !(mods.contains(&"Ctrl") && mods.contains(&"Alt")) && !key.starts_with('F') {
-        return Err("on Windows a shortcut needs Ctrl+Alt, such as Ctrl+Alt+F".into());
-    }
-    let mut out: Vec<String> = mods.iter().map(|m| m.to_uppercase()).collect();
-    out.push(key.to_uppercase());
-    Ok(out.join("+"))
-}
-
+/// The global shortcut is registered by the running program (which
+/// starts at sign-in, in the notification area): see `Backend::set_hotkey`.
+/// A hot key on the Start menu entry instead would only start the
+/// program, and Explorer applies those unreliably.
 #[cfg(windows)]
 pub fn shortcut_enabled() -> bool {
-    launcher_installed() && shortcut_state().is_ok_and(|s| s.exists())
+    current_shortcut().is_some()
 }
 
+/// The global shortcut's keys: what was chosen, else the default (it is
+/// on until turned off, which is saved as "off").
 #[cfg(windows)]
 pub fn current_shortcut() -> Option<String> {
-    let text = fs::read_to_string(shortcut_state().ok()?).ok()?;
+    let Ok(text) = fs::read_to_string(shortcut_state().ok()?) else { return Some(DEFAULT_SHORTCUT.into()) };
     let keys = text.trim();
-    (!keys.is_empty()).then(|| keys.to_string())
+    (!keys.is_empty() && keys != "off").then(|| keys.to_string())
 }
 
 /// Nothing to mend on Windows.
 #[cfg(windows)]
 pub fn repair_shortcut() {}
 
-/// Sets the hot key `keys` (as in "Ctrl+Alt+F") on the Start menu
-/// shortcut, creating it if needed, or takes the hot key away.
+/// Turns the global shortcut on with `keys` (as in "Ctrl+Alt+F"), or
+/// off. The running program then registers or drops it.
 #[cfg(windows)]
 pub fn set_shortcut(on: bool, keys: &str) -> io::Result<bool> {
-    let link = start_menu_link()?;
     let state = shortcut_state()?;
-    if on {
-        let label = shortcut_label(&shortcut_binding(keys).map_err(other)?);
-        let hotkey = windows_hotkey(&label).map_err(other)?;
-        winsys::write_shortcut(&link, &launch_path()?, &hotkey)?;
-        fs::create_dir_all(state.parent().unwrap_or(Path::new(".")))?;
-        fs::write(&state, label)?;
-    } else {
-        if link.exists() {
-            winsys::write_shortcut(&link, &launch_path()?, "")?;
-        }
-        let _ = fs::remove_file(&state);
-    }
+    let text = if on { shortcut_label(&shortcut_binding(keys).map_err(other)?) } else { "off".into() };
+    fs::create_dir_all(state.parent().unwrap_or(Path::new(".")))?;
+    fs::write(&state, text)?;
     Ok(on)
 }
 

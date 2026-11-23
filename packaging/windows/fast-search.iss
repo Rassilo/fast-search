@@ -66,8 +66,9 @@ Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 
 [Icons]
-; The same shortcut the window's Options create: it carries the hot key.
-Name: "{autoprograms}\Fast search"; Filename: "{app}\ff-gui.exe"; WorkingDir: "{app}"; Comment: "Find files instantly by name"; HotKey: ctrl+alt+f
+; The same entry as the window's Options create. The global shortcut is
+; registered by the running program, not set here.
+Name: "{autoprograms}\Fast search"; Filename: "{app}\ff-gui.exe"; WorkingDir: "{app}"; Comment: "Find files instantly by name"
 Name: "{autodesktop}\Fast search"; Filename: "{app}\ff-gui.exe"; WorkingDir: "{app}"; Comment: "Find files instantly by name"; Tasks: desktopicon
 
 [Registry]

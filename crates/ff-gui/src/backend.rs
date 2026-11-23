@@ -92,6 +92,13 @@ pub trait Backend {
     fn set_own_title_bar(&mut self, own: bool) -> bool;
     /// Hides the main window to the notification area instead of closing
     /// it, if the platform has one; false if it does not (then close).
+    /// Makes `keys` (as in "Ctrl+Alt+F") show the main window from anywhere
+    /// while the program runs, or drops it (None). Platforms whose desktop
+    /// keeps the shortcut itself (GNOME) do nothing here.
+    fn set_hotkey(&mut self, _keys: Option<&str>) -> Result<(), String> {
+        Ok(())
+    }
+
     fn hide_to_tray(&mut self) -> bool {
         false
     }

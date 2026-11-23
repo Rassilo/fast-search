@@ -604,7 +604,16 @@ impl App {
                 let set_focus = |app: &mut App, f: usize| app.dialog.as_mut().unwrap().focus = f;
                 // With the text field focused, keys type into it.
                 let typing = matches!(items.get(focus), Some((.., Item::Input(_))));
+                let shortcut_field = matches!(items.get(focus), Some((.., Item::Input(Action::SetShortcut))));
                 match key {
+                    // The shortcut field takes the keys pressed, such as
+                    // Alt+Q, and sets them at once.
+                    _ if shortcut_field && (mods.ctrl || mods.alt) && pressed_keys(key, mods).is_some() => {
+                        self.dialog_input = pressed_keys(key, mods).unwrap_or_default();
+                        self.act(Action::SetShortcut, 0);
+                        self.render_dialog()?;
+                        return Ok(());
+                    }
                     Key::Char(ch) if typing && mods.ctrl => {
                         if ch.eq_ignore_ascii_case(&'v') {
                             self.b.request_paste(); // the text arrives as an event
@@ -628,4 +637,19 @@ impl App {
         }
         self.render_dialog()
     }
+}
+
+/// A key pressed with its modifiers, as people write it ("Ctrl+Alt+F",
+/// "Alt+Q", "Ctrl+F12"), for the shortcut field; None for a key a
+/// shortcut cannot use.
+fn pressed_keys(key: Key, mods: Mods) -> Option<String> {
+    let name = match key {
+        Key::Char(' ') => "Space".to_string(),
+        Key::Char(c) if c.is_ascii_alphanumeric() => c.to_ascii_uppercase().to_string(),
+        // F1 to F12 follow each other as key syms.
+        Key::Sym(sym) if (K_F1..K_F1 + 12).contains(&sym) => format!("F{}", sym - K_F1 + 1),
+        _ => return None,
+    };
+    let held = [(mods.ctrl, "Ctrl+"), (mods.alt, "Alt+"), (mods.shift, "Shift+")];
+    Some(held.iter().filter(|(on, _)| *on).map(|(_, m)| *m).collect::<String>() + &name)
 }

@@ -218,7 +218,7 @@ const TEXTS: &[(&str, [&str; 3])] = &[
     ("Bytes", ["Octets", "Bytes", "Byte"]),
     ("A global shortcut opens Fast search", ["Un raccourci global ouvre Fast search", "Un atajo global abre Fast search", "Una scorciatoia globale apre Fast search"]),
     ("Shortcut", ["Raccourci", "Atajo", "Scorciatoia"]),
-    ("To change it, type the keys, such as Ctrl+Alt+F, and press Enter:", ["Pour le changer, tapez les touches, par exemple Ctrl+Alt+F, puis Entrée :", "Para cambiarlo, escriba las teclas, por ejemplo Ctrl+Alt+F, y pulse Intro:", "Per cambiarla, digita i tasti, ad esempio Ctrl+Alt+F, e premi Invio:"]),
+    ("To change it, click the box below and press the new keys, such as Alt+Q:", ["Pour le changer, cliquez dans la case ci-dessous et appuyez sur les nouvelles touches, par exemple Alt+Q :", "Para cambiarlo, haga clic en el cuadro de abajo y pulse las nuevas teclas, por ejemplo Alt+Q:", "Per cambiarla, fai clic nella casella qui sotto e premi i nuovi tasti, ad esempio Alt+Q:"]),
     ("{} now opens Fast search", ["{} ouvre maintenant Fast search", "{} ahora abre Fast search", "{} ora apre Fast search"]),
     ("Show in the applications menu", ["Afficher dans le menu des applications", "Mostrar en el menú de aplicaciones", "Mostra nel menu delle applicazioni"]),
     ("Closing the window keeps it in the notification area", ["Fermer la fenêtre la garde dans la zone de notification", "Cerrar la ventana la mantiene en el área de notificación", "Chiudere la finestra la tiene nell'area di notifica"]),

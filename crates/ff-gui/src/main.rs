@@ -416,6 +416,11 @@ struct App {
     icons: Icons,
     /// Pixels per layout unit (the rounded desktop scale).
     u: i32,
+    /// Widths of the Name, Size and Modified columns chosen by dragging
+    /// their edges, at a scale of 1 (Path takes the rest); None: automatic.
+    column_widths: Option<[f32; 3]>,
+    /// The header edge being dragged: 1 after Name, 2 after Path, 3 after Size.
+    column_drag: Option<usize>,
     size_w: i32,
     date_w: i32,
 
@@ -779,6 +784,11 @@ impl App {
             drag_paths: String::new(),
             drag_copy_only: false,
             cv: Canvas::new(),
+            column_widths: config.more.get("column_widths").and_then(|v| {
+                let w: Vec<f32> = v.split(',').filter_map(|n| n.trim().parse().ok()).collect();
+                (w.len() == 3 && w.iter().all(|&n| n > 0.0)).then(|| [w[0], w[1], w[2]])
+            }),
+            column_drag: None,
             size_w: text.width("000,000,000 KB") + 16 * u,
             date_w: text.width("0000-00-00 00:00") + 16 * u,
             text,
@@ -861,6 +871,7 @@ impl App {
         };
         app.apply_title_bar();
         app.apply_theme();
+        app.apply_hotkey();
         app.apply_language();
         app.cv.resize((1000 * u) as usize, (640 * u) as usize);
         Ok(app)
@@ -1136,6 +1147,9 @@ impl App {
                     dirty |= std::mem::replace(at, top) != top;
                 }
                 Event::Release { button: 1, .. } => {
+                    if self.column_drag.take().is_some() {
+                        self.save_config();
+                    }
                     self.dragging_scrollbar = false;
                     self.selecting = false;
                     self.drag_arm = None;
@@ -1147,6 +1161,12 @@ impl App {
                 }
                 Event::Release { .. } => {}
                 Event::Motion { x, y, mods, .. } => {
+                    if let Some(edge) = self.column_drag {
+                        self.drag_column(edge, x);
+                        self.b.set_cursor(Cursor::Resize(3));
+                        dirty = true;
+                        continue;
+                    }
                     let hover = self.title_button_at(x, y);
                     dirty |= std::mem::replace(&mut self.hover_button, hover) != hover;
                     let cursor = self.cursor_at(x, y);
@@ -1677,6 +1697,8 @@ impl App {
                     Ok(false) => "Global shortcut removed".into(),
                     Err(e) => format!("could not change the shortcut: {e}"),
                 };
+                self.apply_hotkey();
+                self.refresh_option_states();
                 return;
             }
             Action::SetShortcut => {
@@ -1694,6 +1716,9 @@ impl App {
                         if self.status.is_empty() {
                             self.status = status;
                         }
+                        // Registering may fail (keys taken): that is said instead.
+                        self.apply_hotkey();
+                        self.refresh_option_states();
                     }
                     Err(e) => self.status = format!("could not change the shortcut: {e}"),
                 }
@@ -1935,7 +1960,7 @@ impl App {
                 vec![
                     Row::Check("A global shortcut opens Fast search", Action::ToggleShortcut),
                     Row::Pair("Shortcut", self.shortcut_keys.clone()),
-                    Row::Dim("To change it, type the keys, such as Ctrl+Alt+F, and press Enter:".into()),
+                    Row::Dim("To change it, click the box below and press the new keys, such as Alt+Q:".into()),
                     Row::Input("Ctrl+Alt+F", Action::SetShortcut),
                     // What came of the last change, or why it was refused.
                     Row::Dim(self.status.clone()),
@@ -2267,6 +2292,15 @@ impl App {
         }
     }
 
+    /// Registers the global shortcut with the running program (Windows),
+    /// or drops it when it is off.
+    fn apply_hotkey(&mut self) {
+        let keys = settings::shortcut_enabled().then(settings::current_shortcut).flatten();
+        if let Err(e) = self.b.set_hotkey(keys.as_deref()) {
+            self.status = e;
+        }
+    }
+
     /// Tells the desktop whether we draw the title bar and frame.
     fn apply_title_bar(&mut self) {
         self.custom_title = self.b.set_own_title_bar(self.custom_title);
@@ -2283,6 +2317,9 @@ impl App {
         more.insert("accent".into(), self.accent.to_string());
         more.insert("language".into(), self.language.to_string());
         more.insert("shortcut".into(), self.shortcut_keys.clone());
+        if let Some(w) = self.column_widths {
+            more.insert("column_widths".into(), format!("{:.0},{:.0},{:.0}", w[0], w[1], w[2]));
+        }
         let config = Config { scale, own_title_bar: self.custom_title, regex: self.regex, whole_word: self.whole_word, case, more };
         if let Err(e) = config.save() {
             self.status = format!("could not save settings: {e}");
@@ -2342,6 +2379,8 @@ impl App {
         let on_frame = self.custom_title && self.title_button_at(x, y).is_none();
         if let Some(edge) = self.resize_edge(x, y).filter(|_| on_frame && !covered) {
             Cursor::Resize(edge)
+        } else if !covered && self.column_edge_at(x, y).is_some() {
+            Cursor::Resize(3) // a column edge: left-right arrows
         } else if !covered && self.tree.is_none() && y >= self.menu_h() + 6 * self.u && y < self.box_h() - 6 * self.u && x >= 6 * self.u && x < self.cv.w as i32 - 6 * self.u {
             Cursor::Text // the search box
         } else {
@@ -2837,6 +2876,8 @@ impl App {
                 }
                 self.last_click = (time, row);
             }
+            // A column edge in the header: drag to resize.
+            1 if self.column_edge_at(x, y).is_some() => self.column_drag = self.column_edge_at(x, y),
             1 if y >= self.box_h() => {
                 // Column header: sort by it, or flip the direction.
                 let hit = self.columns().iter().rposition(|&(cx, _)| x >= cx).unwrap_or(0);
@@ -2963,14 +3004,47 @@ impl App {
 
     /// (x, width) in pixels of the Name, Path, Size and Date columns.
     fn columns(&self) -> [(i32, i32); 4] {
-        let avail = (self.cv.w as i32 - self.bar_w() - self.size_w - self.date_w).max(0);
-        let name = (avail * 2 / 5).max(120 * self.u);
+        let px = |w: f32| (w * self.scale).round() as i32;
+        let (size_w, date_w) = self.column_widths.map_or((self.size_w, self.date_w), |w| (px(w[1]), px(w[2])));
+        let avail = (self.cv.w as i32 - self.bar_w() - size_w - date_w).max(0);
+        let name = match self.column_widths {
+            // Path keeps at least a little room when the window narrows.
+            Some(w) => px(w[0]).min(avail - 40 * self.u).max(40 * self.u),
+            None => (avail * 2 / 5).max(120 * self.u),
+        };
         let mut x = 0;
-        [name, (avail - name).max(0), self.size_w, self.date_w].map(|w| {
+        [name, (avail - name).max(0), size_w, date_w].map(|w| {
             let col = (x, w);
             x += w;
             col
         })
+    }
+
+    /// The column edge in the header under (x, y), if any: 1 after Name,
+    /// 2 after Path, 3 after Size.
+    fn column_edge_at(&self, x: i32, y: i32) -> Option<usize> {
+        if self.tree.is_some() || y < self.box_h() || y >= self.list_top() {
+            return None;
+        }
+        let cols = self.columns();
+        (1..4).find(|&i| (x - cols[i].0).abs() <= 6 * self.u)
+    }
+
+    /// Moves column edge `edge` to `x`: the columns on each side of it
+    /// grow and shrink, each keeping a minimum width.
+    fn drag_column(&mut self, edge: usize, x: i32) {
+        let [(_, name), _, (size_x, size), (date_x, date)] = self.columns();
+        let min = 40 * self.u;
+        let (name, size, date) = match edge {
+            1 => (x.clamp(min, (size_x - min).max(min)), size, date),
+            2 => (name, (date_x - x).max(min), date),
+            _ => {
+                let x = x.clamp(size_x + min, (date_x + date - min).max(size_x + min));
+                (name, x - size_x, date_x + date - x)
+            }
+        };
+        let logical = |w: i32| w as f32 / self.scale;
+        self.column_widths = Some([logical(name), logical(size), logical(date)]);
     }
 
     /// Scrollbar (track height, thumb height) in pixels.
