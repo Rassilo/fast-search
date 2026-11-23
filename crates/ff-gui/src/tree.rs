@@ -370,7 +370,7 @@ impl App {
             self.text.draw(&mut self.cv, name_x, ty, &name, cols[0].1 - pad - name_x, fg);
             self.cv.clip = (0, right);
             // Size, files and folders, right-aligned; counts kept short.
-            let count = |n: u32| if is_dir { short_count(n) } else { String::new() };
+            let count = |n: u32| if is_dir { ff_core::sizes::short_count(n) } else { String::new() };
             let cells = [(units(tree.total(id)), fg), (count(tree.files(id)), dim), (count(tree.folders(id)), dim)];
             for ((cell, color), &(cx, cw)) in cells.into_iter().zip(&cols[1..4]) {
                 if cw > 0 {
@@ -497,17 +497,5 @@ impl App {
                 self.cv.fill(x - s / 2 + i, y - s + i, 1, 2 * (s - i), color);
             }
         }
-    }
-}
-
-/// A count kept short for a narrow column: 950, 1.5K, 46K, 1.2M.
-fn short_count(n: u32) -> String {
-    let n = n as f64;
-    match n {
-        n if n < 1e3 => format!("{n}"),
-        n if n < 1e4 => format!("{:.1}K", n / 1e3),
-        n if n < 1e6 => format!("{:.0}K", n / 1e3),
-        n if n < 1e7 => format!("{:.1}M", n / 1e6),
-        n => format!("{:.0}M", n / 1e6),
     }
 }

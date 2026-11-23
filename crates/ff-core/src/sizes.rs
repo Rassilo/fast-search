@@ -436,3 +436,15 @@ mod tests {
         }
     }
 }
+
+/// A count kept short for a narrow column: 950, 1.5K, 46K, 1.2M.
+pub fn short_count(n: u32) -> String {
+    let n = n as f64;
+    match n {
+        n if n < 1e3 => format!("{n}"),
+        n if n < 1e4 => format!("{:.1}K", n / 1e3),
+        n if n < 1e6 => format!("{:.0}K", n / 1e3),
+        n if n < 1e7 => format!("{:.1}M", n / 1e6),
+        n => format!("{:.0}M", n / 1e6),
+    }
+}

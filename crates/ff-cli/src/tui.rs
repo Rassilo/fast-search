@@ -695,6 +695,11 @@ struct Paint {
     dim: &'static str,
     accent: &'static str,
     error: &'static str,
+    /// Share bars: the filled part, the same for a nearly full disk, and
+    /// the track behind them (a background colour).
+    bar: &'static str,
+    full: &'static str,
+    track: &'static str,
 }
 
 struct Complete {
@@ -768,6 +773,9 @@ struct Ui {
     note: Option<(String, Instant)>,
     complete: Option<Complete>,
     tree: Option<Tree>,
+    /// Per root of the folder sizes tree: its drive's capacity and free
+    /// space, where known.
+    disks: Vec<(u32, (u64, u64))>,
     /// A panel over the list (help, properties): its title and lines.
     panel: Option<(String, Vec<(String, String)>)>,
     bookmarks: Vec<Bookmark>,
@@ -785,9 +793,19 @@ impl Ui {
     fn new(term: Term, db: PathBuf, stamp: Option<SystemTime>, index: Index, start: Start) -> Ui {
         let plain = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
         let paint = if plain {
-            Paint { folder: "", link: "", dim: "", accent: "", error: "" }
+            Paint { folder: "", link: "", dim: "", accent: "", error: "", bar: "", full: "", track: "" }
         } else {
-            Paint { folder: "\x1b[1;34m", link: "\x1b[36m", dim: "\x1b[2m", accent: "\x1b[1;33m", error: "\x1b[1;31m" }
+            Paint {
+                folder: "\x1b[1;34m",
+                link: "\x1b[36m",
+                dim: "\x1b[2m",
+                accent: "\x1b[1;33m",
+                error: "\x1b[1;31m",
+                // 256-colour blue, and a red of the same tone, on dark grey.
+                bar: "\x1b[38;5;33m",
+                full: "\x1b[38;5;167m",
+                track: "\x1b[48;5;237m",
+            }
         };
         let sort = SORTS.iter().position(|(s, r, _)| *s == start.sort && *r == start.reverse).unwrap_or(0);
         let cursor = start.query.len();
@@ -816,6 +834,7 @@ impl Ui {
             note: None,
             complete: None,
             tree: None,
+            disks: Vec::new(),
             panel: None,
             bookmarks: ff_core::bookmarks::load(),
             last_click: (Instant::now(), usize::MAX),
@@ -1309,6 +1328,8 @@ impl Ui {
             }
         }
         self.tree = Some(tree);
+        let index = &self.index;
+        self.disks = index.roots().filter_map(|r| ff_core::os::disk_space(&index.path(r)).map(|d| (r, d))).collect();
     }
 
     fn tree_key(&mut self, key: Key) -> io::Result<Option<End>> {
@@ -1358,13 +1379,15 @@ impl Ui {
 
     fn tree_mouse(&mut self, button: u16, x: usize, y: usize) {
         let body = self.body_rows();
+        // Rows start below the title, and below the column names when shown.
+        let first = 1 + (body > 3) as usize;
         let Some(tree) = self.tree.as_mut() else { return };
         let last = tree.rows.len().saturating_sub(1);
         match button {
             64 => tree.sel = tree.sel.saturating_sub(3),
             65 => tree.sel = (tree.sel + 3).min(last),
-            0 if y >= 1 && y <= body => {
-                let row = tree.top + y - 1;
+            0 if y >= first && y <= body => {
+                let row = tree.top + y - first;
                 let Some(node) = tree.rows.get(row) else { return };
                 let on_arrow = x >= 2 + 2 * node.depth as usize && x < 4 + 2 * node.depth as usize;
                 let double = self.last_click.1 == row && self.last_click.0.elapsed() < Duration::from_millis(400);
@@ -1489,17 +1512,41 @@ impl Ui {
     }
 
     fn tree_lines(&mut self, body: usize, cols: usize, lines: &mut Vec<String>) {
-        let Some(tree) = self.tree.as_mut() else { return };
-        tree.sel = tree.sel.min(tree.rows.len().saturating_sub(1));
-        if tree.sel < tree.top {
-            tree.top = tree.sel;
-        } else if tree.sel >= tree.top + body {
-            tree.top = tree.sel + 1 - body;
+        // Columns from the right, as the width allows: size; files and
+        // folders; the share of the parent and of the disk, each a bar
+        // with its figure.
+        let (counts, parent, disk) = (cols >= 72, cols >= 56, cols >= 96 && !self.disks.is_empty());
+        // One more for the last column, which stays empty: writing there
+        // makes terminals wrap the line.
+        let right = 11 + if counts { 14 } else { 0 } + if parent { 16 } else { 0 } + if disk { 17 } else { 0 };
+        // A line naming the columns, when there is room for rows below it.
+        let header = body > 3;
+        let rows = body - header as usize;
+        {
+            let Some(tree) = self.tree.as_mut() else { return };
+            tree.sel = tree.sel.min(tree.rows.len().saturating_sub(1));
+            if tree.sel < tree.top {
+                tree.top = tree.sel;
+            } else if tree.sel >= tree.top + rows {
+                tree.top = tree.sel + 1 - rows;
+            }
         }
-        let tree = &*tree;
-        let (full, medium) = (cols >= 80, cols >= 50);
-        let right = if full { 41 } else if medium { 18 } else { 10 };
-        for row in tree.top..(tree.top + body).min(tree.rows.len()) {
+        let Some(tree) = self.tree.as_ref() else { return };
+        if header {
+            let mut line = format!("\x1b[0m{}  {}", self.paint.dim, pad("Name", cols.saturating_sub(right + 2)));
+            line.push_str(&format!("{:>9} ", "Size"));
+            if counts {
+                line.push_str(&format!("{:>6} {:>6} ", "Files", "Dirs"));
+            }
+            if parent {
+                line.push_str(&format!(" {:<15}", "% of parent"));
+            }
+            if disk {
+                line.push_str(&format!("  {:<15}", "% of disk"));
+            }
+            lines.push(line);
+        }
+        for row in tree.top..(tree.top + rows).min(tree.rows.len()) {
             let node = &tree.rows[row];
             let id = node.id;
             let base = if row == tree.sel { "\x1b[0;7m" } else { "\x1b[0m" };
@@ -1512,19 +1559,51 @@ impl Ui {
             let mut line = format!("{base}  {indent}{}{arrow}{base}{colour}{name}{base}", self.paint.dim);
             let used = 2 + indent.len() + 2 + width(&name);
             line.push_str(&" ".repeat(cols.saturating_sub(right).saturating_sub(used)));
-            let of = self.index.parent(id).map_or(tree.total(id), |p| tree.total(p));
-            let share = if of == 0 { 0.0 } else { tree.total(id) as f64 / of as f64 };
-            let size = human_size(tree.total(id));
-            if full {
-                let files = if is_dir { group_digits(tree.files(id) as u64) } else { String::new() };
-                line.push_str(&format!("{}{}{base} {size:>9} {files:>11} {:>6.1}% ", self.paint.accent, bar(share, 10), share * 100.0));
-            } else if medium {
-                line.push_str(&format!("{size:>9} {:>6.1}% ", share * 100.0));
-            } else {
-                line.push_str(&format!("{size:>9} "));
+            line.push_str(&format!("{:>9} ", human_size(tree.total(id))));
+            if counts {
+                let count = |n: u32| if is_dir { ff_core::sizes::short_count(n) } else { String::new() };
+                line.push_str(&format!("{}{:>6} {:>6}{base} ", self.paint.dim, count(tree.files(id)), count(tree.folders(id))));
+            }
+            if parent {
+                let of = self.index.parent(id).map_or(tree.total(id), |p| tree.total(p));
+                let share = if of == 0 { 0.0 } else { tree.total(id) as f64 / of as f64 };
+                line.push(' ');
+                line.push_str(&self.share(Some(share), self.paint.bar, base));
+            }
+            if disk {
+                let share = self.disk_share(tree, id);
+                let colour = if share.is_some_and(|s| s >= 0.9) { self.paint.full } else { self.paint.bar };
+                line.push_str("  ");
+                line.push_str(&self.share(share, colour, base));
             }
             lines.push(line);
         }
+    }
+
+    /// A share as an 8-cell bar on its track, then its figure: 15 cells.
+    fn share(&self, share: Option<f64>, colour: &str, base: &str) -> String {
+        let Some(share) = share else { return " ".repeat(15) };
+        format!("{}{colour}{}{base} {:>5.1}%", self.paint.track, bar(share, 8), share * 100.0)
+    }
+
+    /// The capacity and free space of the drive `id` is on, if known.
+    fn disk_of(&self, mut id: u32) -> Option<(u64, u64)> {
+        while let Some(p) = self.index.parent(id) {
+            id = p;
+        }
+        self.disks.iter().find(|d| d.0 == id).map(|d| d.1)
+    }
+
+    /// True for a whole drive: a root such as C:\ or /.
+    fn is_drive(&self, id: u32) -> bool {
+        self.index.parent(id).is_none() && self.index.path(id).parent().is_none()
+    }
+
+    /// An entry's share of its drive; for a whole drive, how full it is.
+    fn disk_share(&self, tree: &Tree, id: u32) -> Option<f64> {
+        let (capacity, free) = self.disk_of(id)?;
+        let used = if self.is_drive(id) { capacity.saturating_sub(free) } else { tree.total(id) };
+        Some((used as f64 / capacity as f64).min(1.0))
     }
 
     fn panel_lines(&self, title: &str, items: &[(String, String)], body: usize, cols: usize, lines: &mut Vec<String>) {
@@ -1541,7 +1620,20 @@ impl Ui {
             match tree.selected() {
                 Some(id) => {
                     let files = if self.index.is_dir(id) { format!("  ·  {} files", group_digits(tree.files(id) as u64)) } else { String::new() };
-                    format!(" {} ({} bytes){files}  ·  Esc back", human_size(tree.total(id)), group_digits(tree.total(id)))
+                    // A whole drive: how full it is; anything else: its
+                    // share of the drive.
+                    let disk = match (self.disk_of(id), self.disk_share(tree, id)) {
+                        (Some((capacity, free)), Some(share)) if self.is_drive(id) => format!(
+                            "  ·  disk {:.1} % used: {} of {}, {} free",
+                            share * 100.0,
+                            human_size(capacity.saturating_sub(free)),
+                            human_size(capacity),
+                            human_size(free)
+                        ),
+                        (_, Some(share)) => format!("  ·  {:.1} % of the disk", share * 100.0),
+                        _ => String::new(),
+                    };
+                    format!(" {} ({} bytes){files}{disk}  ·  Esc back", human_size(tree.total(id)), group_digits(tree.total(id)))
                 }
                 None => " The index is empty".into(),
             }
