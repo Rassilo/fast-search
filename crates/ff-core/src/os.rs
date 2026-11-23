@@ -183,6 +183,34 @@ pub fn atime(md: &fs::Metadata) -> i64 {
     }
 }
 
+/// Makes the calling thread a background one: it runs when nothing else
+/// wants the processor, and (on Windows) its disk reads wait for others'.
+/// For work nobody waits for, so a small laptop stays responsive.
+pub fn background_thread() {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentThread() -> *mut std::ffi::c_void;
+            fn SetThreadPriority(thread: *mut std::ffi::c_void, priority: i32) -> i32;
+        }
+        const THREAD_MODE_BACKGROUND_BEGIN: i32 = 0x0001_0000;
+        // SAFETY: the pseudo-handle of this thread.
+        unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) };
+    }
+    #[cfg(target_os = "linux")]
+    {
+        unsafe extern "C" {
+            fn gettid() -> i32;
+            fn setpriority(which: i32, who: u32, prio: i32) -> i32;
+        }
+        // On Linux a thread's nice value is its own: PRIO_PROCESS with
+        // the thread id sets just this one.
+        // SAFETY: plain system calls.
+        unsafe { setpriority(0, gettid() as u32, 19) };
+    }
+}
+
 /// The modification time of `path` (as [`mtime`] gives it), cheaply: on
 /// Windows without opening it (`GetFileAttributesExW`), which matters when
 /// checking every folder of a drive. None if it is not there.

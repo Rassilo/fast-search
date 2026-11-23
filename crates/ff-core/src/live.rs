@@ -42,6 +42,22 @@ fn ends_with_sep(path: &[u8]) -> bool {
     path.last().is_some_and(|&b| crate::os::is_sep(b))
 }
 
+/// One bit per entry of an index of `len` entries, set for `ids`.
+fn bits_of(len: usize, ids: impl Iterator<Item = u32>) -> Vec<u64> {
+    let mut bits = vec![0u64; len.div_ceil(64)];
+    for id in ids {
+        if let Some(word) = bits.get_mut(id as usize / 64) {
+            *word |= 1 << (id % 64);
+        }
+    }
+    bits
+}
+
+/// Whether `id`'s bit is set (never for NO_PARENT and other ids past the end).
+fn has_bit(bits: &[u64], id: u32) -> bool {
+    bits.get(id as usize / 64).is_some_and(|w| w & (1 << (id % 64)) != 0)
+}
+
 fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
     let mut path = dir.to_vec();
     if !ends_with_sep(&path) {
@@ -135,14 +151,14 @@ impl Tracker {
         if wanted.is_empty() {
             return false;
         }
-        // One pass over the index finds the entries that already exist. A
-        // few directories are compared directly, faster than hashing each
-        // of millions of parents.
-        let few: Vec<u32> = if wanted.len() <= 16 { wanted.keys().copied().collect() } else { Vec::new() };
+        // One pass over the index finds the entries that already exist:
+        // each entry's parent is looked up in a bit per entry, much cheaper
+        // than hashing millions of parents.
+        let wanted_bits = bits_of(index.len(), wanted.keys().copied());
         let mut existing: HashMap<(u32, &[u8]), u32> = HashMap::new();
         for id in 0..index.len() as u32 {
             let parent = index.parent[id as usize];
-            if !few.is_empty() && !few.contains(&parent) {
+            if !has_bit(&wanted_bits, parent) {
                 continue;
             }
             if wanted.get(&parent).is_some_and(|names| names.contains(index.name(id))) && !index.is_gone(id) {
@@ -233,8 +249,13 @@ impl Tracker {
         if paths.is_empty() {
             return false;
         }
+        let dir_bits = bits_of(index.len(), paths.keys().copied());
         for id in 0..index.len() as u32 {
-            if let Some(path) = paths.get(&index.parent[id as usize]).filter(|_| !index.is_gone(id)) {
+            let parent = index.parent[id as usize];
+            if !has_bit(&dir_bits, parent) {
+                continue;
+            }
+            if let Some(path) = paths.get(&parent).filter(|_| !index.is_gone(id)) {
                 changes.insert((path.clone(), index.name(id).to_vec()));
             }
         }
@@ -315,7 +336,12 @@ impl CatchUp {
         self.workers.entry(root).or_insert_with(|| {
             let (tx, jobs) = std::sync::mpsc::channel::<Vec<(u32, std::path::PathBuf, i64)>>();
             std::thread::spawn(move || {
+                // Nobody waits for this: it gives way to everything else,
+                // and works at most half the time, so even a small laptop
+                // hardly notices it.
+                crate::os::background_thread();
                 for chunk in jobs {
+                    let start = std::time::Instant::now();
                     let changed: Vec<(u32, i64)> = chunk
                         .into_iter()
                         .filter_map(|(id, path, old)| crate::os::quick_mtime(&path).filter(|&now| now != old).map(|now| (id, now)))
@@ -323,6 +349,7 @@ impl CatchUp {
                     if done.send((root, changed)).is_err() {
                         return;
                     }
+                    std::thread::sleep(start.elapsed());
                 }
             });
             Worker { tx, gathered: Vec::new(), busy: false }
