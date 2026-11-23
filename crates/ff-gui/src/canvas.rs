@@ -705,6 +705,9 @@ pub struct Icons {
     own: HashMap<std::path::PathBuf, Option<Vec<[u8; 4]>>>,
     #[cfg(windows)]
     asked: std::collections::HashSet<std::path::PathBuf>,
+    /// Windows: type icons asked for and not in yet.
+    #[cfg(windows)]
+    asked_kinds: std::collections::HashSet<String>,
     #[cfg(windows)]
     loader: Option<crate::shell_icons::Loader>,
 }
@@ -724,6 +727,8 @@ impl Icons {
             #[cfg(windows)]
             asked: Default::default(),
             #[cfg(windows)]
+            asked_kinds: Default::default(),
+            #[cfg(windows)]
             loader: None,
         }
     }
@@ -734,23 +739,31 @@ impl Icons {
         blit(cv, x, y, size, image);
     }
 
-    /// Takes in the files' own icons read since the last call; true if
-    /// any came (the window should be drawn again).
+    /// Takes in the icons read since the last call; true if any came
+    /// (the window should be drawn again).
     pub fn take_loaded(&mut self) -> bool {
         #[cfg(windows)]
         if let Some(loader) = &self.loader {
             let ready = loader.ready();
             let any = !ready.is_empty();
-            self.own.extend(ready);
+            for loaded in ready {
+                match loaded {
+                    crate::shell_icons::Loaded::Own(path, pixels) => drop(self.own.insert(path, pixels)),
+                    crate::shell_icons::Loaded::Kind(key, pixels) => {
+                        self.asked_kinds.remove(&key);
+                        self.system.insert(key, pixels);
+                    }
+                }
+            }
             return any;
         }
         false
     }
 
-    /// True while files' own icons are still being read.
+    /// True while icons are still being read.
     pub fn loading(&self) -> bool {
         #[cfg(windows)]
-        return self.asked.len() > self.own.len();
+        return self.asked.len() > self.own.len() || !self.asked_kinds.is_empty();
         #[cfg(not(windows))]
         false
     }
@@ -782,7 +795,8 @@ impl Icons {
                     return blit(cv, x, y, size, image);
                 }
                 if self.asked.insert(path.to_path_buf()) {
-                    self.loader.get_or_insert_with(crate::shell_icons::Loader::new).request(path.to_path_buf(), size);
+                    let job = crate::shell_icons::Job::Own(path.to_path_buf(), size);
+                    self.loader.get_or_insert_with(crate::shell_icons::Loader::new).request(job);
                 }
             }
             // A stand-in name of the same type is all the shell needs.
@@ -797,10 +811,19 @@ impl Icons {
                 };
                 (ext.clone(), format!("file{ext}"))
             };
-            let real = drive.then_some(path);
-            let image = self.system.entry(key).or_insert_with(|| crate::shell_icons::icon(&query, is_dir, real, size));
-            if let Some(image) = image {
-                return blit(cv, x, y, size, image);
+            // Read on the loader's thread (the shell can take a while for a
+            // type it has not shown yet); the built-in icon stands in until
+            // then, a frame or two.
+            match self.system.get(&key) {
+                Some(Some(image)) => return blit(cv, x, y, size, image),
+                Some(None) => {}
+                None => {
+                    if self.asked_kinds.insert(key.clone()) {
+                        let real = drive.then(|| path.to_path_buf());
+                        let job = crate::shell_icons::Job::Kind { key, query, is_dir, real, size };
+                        self.loader.get_or_insert_with(crate::shell_icons::Loader::new).request(job);
+                    }
+                }
             }
         }
         // The desktop's icon theme (Linux and others).

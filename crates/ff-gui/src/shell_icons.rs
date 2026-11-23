@@ -159,26 +159,48 @@ unsafe extern "system" {
     fn CoInitializeEx(reserved: *mut c_void, model: u32) -> i32;
 }
 
-type Loaded = (std::path::PathBuf, Option<Vec<[u8; 4]>>);
+/// An icon to read: a file's own (by its path), or that of a type (by a
+/// key naming it, with the stand-in name the shell is asked about).
+pub enum Job {
+    Own(std::path::PathBuf, usize),
+    Kind { key: String, query: String, is_dir: bool, real: Option<std::path::PathBuf>, size: usize },
+}
 
-/// Reads files' own icons on a thread of its own, so a slow disk never
-/// holds the window up: ask with `request`, collect with `ready`.
+/// An icon read, for the job that asked for it.
+pub enum Loaded {
+    Own(std::path::PathBuf, Option<Vec<[u8; 4]>>),
+    Kind(String, Option<Vec<[u8; 4]>>),
+}
+
+/// Reads icons on a thread of its own, so neither a slow disk nor a slow
+/// shell extension holds the window up: ask with `request`, collect with
+/// `ready`.
 pub struct Loader {
-    ask: std::sync::mpsc::Sender<(std::path::PathBuf, usize)>,
+    ask: std::sync::mpsc::Sender<Job>,
     done: std::sync::mpsc::Receiver<Loaded>,
 }
 
 impl Loader {
     pub fn new() -> Loader {
-        let (ask, asked) = std::sync::mpsc::channel::<(std::path::PathBuf, usize)>();
+        let (ask, asked) = std::sync::mpsc::channel::<Job>();
         let (send, done) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             // The shell wants COM on the thread that asks it.
             // SAFETY: once, at the start of this thread.
             unsafe { CoInitializeEx(std::ptr::null_mut(), 0x2) }; // apartment threaded
-            for (path, size) in asked {
-                let pixels = own_icon(&path, size);
-                if send.send((path, pixels)).is_err() {
+            for job in asked {
+                let loaded = match job {
+                    Job::Own(path, size) => {
+                        let pixels = own_icon(&path, size);
+                        Loaded::Own(path, pixels)
+                    }
+                    Job::Kind { key, query, is_dir, real, size } => {
+                        // Its first answer on a new thread is sometimes empty.
+                        let pixels = icon(&query, is_dir, real.as_deref(), size).or_else(|| icon(&query, is_dir, real.as_deref(), size));
+                        Loaded::Kind(key, pixels)
+                    }
+                };
+                if send.send(loaded).is_err() {
                     break;
                 }
             }
@@ -186,8 +208,8 @@ impl Loader {
         Loader { ask, done }
     }
 
-    pub fn request(&self, path: std::path::PathBuf, size: usize) {
-        let _ = self.ask.send((path, size));
+    pub fn request(&self, job: Job) {
+        let _ = self.ask.send(job);
     }
 
     pub fn ready(&self) -> Vec<Loaded> {

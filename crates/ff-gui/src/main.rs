@@ -584,6 +584,10 @@ struct App {
     dropped_searches: Vec<(Arc<AtomicBool>, std::thread::JoinHandle<()>)>,
     /// The current window's results are out of date: a search waits.
     search_pending: bool,
+    /// When the user last typed, clicked, scrolled or moved the pointer:
+    /// followed file changes wait until they pause, so dragging and typing
+    /// stay smooth.
+    last_input: Instant,
 }
 
 /// A search on a thread of its own, so typing never waits for one: the
@@ -1036,6 +1040,7 @@ impl App {
             search_job: None,
             dropped_searches: Vec::new(),
             search_pending: false,
+            last_input: Instant::now(),
             drop_moved: false,
             last_click: (0, usize::MAX),
         };
@@ -1191,6 +1196,29 @@ impl App {
                 self.finish_build(true);
             }
             Ok("tree") => self.toggle_tree(),
+            // Times drawing while scrolling through the whole list (as by
+            // dragging the scroll bar), into FF_GUI_DEBUG.
+            Ok("scroll-bench") => {
+                if self.cv.w == 0 {
+                    self.cv.resize(1000, 640);
+                }
+                let rows = self.rows_visible().max(1);
+                let (mut total, mut worst, mut frames) = (Duration::ZERO, Duration::ZERO, 0u32);
+                let step = (self.hits.len() / 200).max(rows);
+                let mut top = 0;
+                while top < self.hits.len() && frames < 200 {
+                    self.top = top;
+                    let t = Instant::now();
+                    let _ = self.render();
+                    let took = t.elapsed();
+                    total += took;
+                    worst = worst.max(took);
+                    frames += 1;
+                    top += step;
+                }
+                debug::log(format!("scroll-bench: {frames} frames of {}x{}, average {:?}, worst {:?}", self.cv.w, self.cv.h, total / frames.max(1), worst));
+                return Ok(());
+            }
             // A second window, searching on its own (the first keeps its
             // search): the snapshot shows the second.
             Ok("second-window") => {
@@ -1321,6 +1349,9 @@ impl App {
                 Event::Shown => Some(backend::FIRST),
                 _ => None,
             };
+            if matches!(event, Event::Key { .. } | Event::Press { .. } | Event::Motion { .. } | Event::Scroll { .. }) {
+                self.last_input = Instant::now();
+            }
             if let Some(Win::Main(n)) = target.filter(|_| self.dialog.is_none()) {
                 if n != self.current {
                     if dirty {
@@ -1762,8 +1793,10 @@ impl App {
             return false;
         }
         // While a build or a search runs, events wait: they apply to the
-        // new index, or once the search is done.
-        if self.building.is_some() || self.searching() {
+        // new index, or once the search is done. So they do while the user
+        // is busy in a window (a quarter of a second after the last input),
+        // so dragging and typing are never held up.
+        if self.building.is_some() || self.searching() || self.last_input.elapsed() < Duration::from_millis(250) {
             return false;
         }
         if self.follow.as_ref().is_none_or(|f| !f.suits(&self.index)) {
