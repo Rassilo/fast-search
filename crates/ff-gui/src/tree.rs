@@ -9,7 +9,7 @@ use ff_core::sizes::human_size as units;
 pub use ff_core::sizes::{Kept, Tile, Tree};
 
 use crate::backend::{Key, Mods};
-use crate::canvas::{Icon, ON_ACCENT};
+use crate::canvas::{Icon, ON_ACCENT, palette};
 use crate::i18n::{tr, trf};
 use crate::keys::*;
 use crate::{Action, App, DIM, LINE, Menu, PANEL, SELECT, TEXT, WHITE};
@@ -91,15 +91,25 @@ impl App {
         if w < 640 * self.u || !self.flag(crate::Flag::SizeMap) { w } else { (w * 46 / 100).max(380 * self.u) }
     }
 
-    /// (x, width) of the Name, Size, Files and Share columns.
-    fn tree_columns(&mut self) -> [(i32, i32); 4] {
+    /// (x, width) of the Name, Size, Files, Folders, % of parent and
+    /// Modified columns. Narrow trees (beside the map) drop the last ones.
+    fn tree_columns(&mut self) -> [(i32, i32); 6] {
         let pad = 8 * self.u;
-        let files = self.text.width("9,999,999") + 2 * pad;
-        let share = self.text.width("100.0 %").max(self.text.width(tr("Share"))) + 2 * pad;
+        let count = self.text.width("9,999,999") + 2 * pad;
         let size = self.text.width("1,023.9 MB") + 2 * pad;
-        let name = (self.tree_split() - self.bar_w() - size - files - share).max(120 * self.u);
+        let share = 110 * self.u;
+        let date = self.text.width("0000-00-00") + 2 * pad;
+        let room = self.tree_split() - self.bar_w();
+        let mut widths = [0, size, count, count, share, date];
+        // Columns go from the right end while the name keeps 200 units.
+        for i in [5, 3, 2] {
+            if room - widths.iter().sum::<i32>() < 200 * self.u {
+                widths[i] = 0;
+            }
+        }
+        widths[0] = (room - widths.iter().sum::<i32>()).max(120 * self.u);
         let mut x = 0;
-        [name, size, files, share].map(|w| {
+        widths.map(|w| {
             let col = (x, w);
             x += w;
             col
@@ -268,23 +278,26 @@ impl App {
         let split = self.tree_split();
         let cols = self.tree_columns();
 
-        // Where the search box was: the path of the selected entry.
+        // Where the search box was: the path of the selected entry. It
+        // cannot be edited, so it does not look like the search box.
         let top = self.menu_h();
         let path = tree.selected().map(|id| self.index.path(id).display().to_string()).unwrap_or_default();
-        // It cannot be edited, so it does not look like the search box.
-        self.cv.fill(6 * u, top + 6 * u, w - 12 * u, row_h + 2 * u, PANEL);
-        self.cv.frame(6 * u, top + 6 * u, w - 12 * u, row_h + 2 * u, u.max(1), LINE);
+        self.cv.round_frame(6 * u, top + 6 * u, w - 12 * u, row_h + 2 * u, 4 * u, u.max(1), LINE, PANEL);
         let path_x = self.box_text_x();
         self.text.draw(&mut self.cv, path_x, top + 10 * u, &path, w - 28 * u, DIM);
 
+        // Column headers, quiet, as in the results list.
         let y = self.box_h();
-        self.cv.fill(0, y, w, row_h, PANEL);
-        self.cv.fill(0, y + row_h, w, 1, LINE);
-        for (i, (label, (x, cw))) in ["Name", "Size", "Files", "Share"].into_iter().zip(cols).enumerate() {
+        self.cv.fill(0, y, split, h - y - row_h, palette::CARD);
+        self.cv.fill(pad, y + row_h, split - 2 * pad, 1, LINE);
+        let heads = ["Name", "Size", "Files", "Folders", "% of parent", "Modified"];
+        for (i, (label, (x, cw))) in heads.into_iter().zip(cols).enumerate().filter(|(_, (_, (_, cw)))| *cw > 0) {
             if i > 0 {
-                self.cv.fill(x, y + 4 * u, 1, row_h - 8 * u, LINE);
+                self.cv.fill(x, y + 6 * u, 1, row_h - 12 * u, LINE);
             }
-            self.text.draw(&mut self.cv, x + pad, y + 3 * u, tr(label), cw - 2 * pad, TEXT);
+            // Numbers are right-aligned, and so are their headings.
+            let lx = if (1..4).contains(&i) { x + cw - pad - self.text.width(tr(label)) } else { x + pad };
+            self.text.draw(&mut self.cv, lx, y + 3 * u, tr(label), cw - 2 * pad, DIM);
         }
 
         // The tree.
@@ -292,21 +305,25 @@ impl App {
         let list_top = self.list_top();
         let icon = self.icons.size as i32;
         let right = split - bar;
+        let everything = tree.grand_total();
         self.cv.clip = (0, right);
         for row in 0..rows {
             let Some(node) = tree.rows.get(tree.top + row) else { break };
             let (id, y) = (node.id, list_top + row as i32 * row_h);
             let selected = tree.top + row == tree.sel;
             let (fg, dim) = if selected { (ON_ACCENT, ON_ACCENT) } else { (TEXT, DIM) };
-            // Its share of the folder it is in, also drawn as a bar.
-            let of = self.index.parent(id).map_or(tree.total(id), |p| tree.total(p));
+            // Its share of the folder it is in; a drive's, of all drives.
+            let of = self.index.parent(id).map_or(everything, |p| tree.total(p));
             let share = if of == 0 { 0.0 } else { tree.total(id) as f64 / of as f64 };
             let x = pad / 2 + node.depth as i32 * 14 * u;
             if selected {
                 self.cv.fill(0, y, right, row_h, SELECT);
-            } else {
-                let room = (cols[0].1 - x - 16 * u).max(0);
-                self.cv.fill(x + 16 * u, y + 2 * u, (room as f64 * share) as i32, row_h - 4 * u, 0xfdebc4);
+            }
+            // Behind the name, a quiet bar as long as its share.
+            let name_left = x + 16 * u;
+            if !selected {
+                let room = (cols[0].1 - name_left - pad).max(0);
+                self.cv.fill(name_left, y + 3 * u, (room as f64 * share) as i32, row_h - 6 * u, palette::PICKED);
             }
             let is_dir = self.index.is_dir(id);
             self.cv.clip = (0, cols[0].1);
@@ -314,24 +331,52 @@ impl App {
                 self.draw_arrow(x + 5 * u, y + row_h / 2, node.open, dim);
             }
             let kind = Icon::of(self.index.name(id), is_dir, self.index.is_symlink(id));
-            self.icons.draw(&mut self.cv, x + 16 * u, y + (row_h - icon) / 2, kind);
+            self.icons.draw(&mut self.cv, name_left, y + (row_h - icon) / 2, kind);
             let name = String::from_utf8_lossy(self.index.name(id)).into_owned();
-            let (name_x, ty) = (x + 16 * u + icon + 6 * u, y + 3 * u);
+            let (name_x, ty) = (name_left + icon + 6 * u, y + 3 * u);
             self.text.draw(&mut self.cv, name_x, ty, &name, cols[0].1 - pad - name_x, fg);
             self.cv.clip = (0, right);
-            let files = if is_dir { group_digits(tree.files(id) as u64) } else { String::new() };
-            let cells = [(units(tree.total(id)), fg), (files, dim), (format!("{:.1} %", share * 100.0), dim)];
-            for ((cell, color), (cx, cw)) in cells.into_iter().zip(&cols[1..]) {
-                let x = cx + cw - pad - self.text.width(&cell);
-                self.text.draw(&mut self.cv, x, ty, &cell, *cw, color);
+            // Size, files and folders, right-aligned.
+            let count = |n: u32| if is_dir { group_digits(n as u64) } else { String::new() };
+            let cells = [(units(tree.total(id)), fg), (count(tree.files(id)), dim), (count(tree.folders(id)), dim)];
+            for ((cell, color), &(cx, cw)) in cells.into_iter().zip(&cols[1..4]) {
+                if cw > 0 {
+                    let cell_w = self.text.width(&cell);
+                    self.text.draw(&mut self.cv, cx + cw - pad - cell_w, ty, &cell, cw, color);
+                }
+            }
+            // The share as a bar with its figure on it: the figure is
+            // white over the filled part and ink over the rest.
+            let (sx, sw) = cols[4];
+            let (bx, bw, bh) = (sx + pad / 2, sw - pad, row_h - 6 * u);
+            let filled = (bw as f64 * share).round() as i32;
+            let track = if selected { ON_ACCENT } else { LINE };
+            self.cv.round(bx, y + 3 * u, bw, bh, 3 * u, track);
+            if filled > 0 {
+                self.cv.clip = (bx, bx + filled);
+                self.cv.round(bx, y + 3 * u, bw, bh, 3 * u, SELECT);
+            }
+            let figure = format!("{:.1} %", share * 100.0);
+            let fx = bx + (bw - self.text.width(&figure)) / 2;
+            let (on_fill, on_track) = if selected { (ON_ACCENT, SELECT) } else { (ON_ACCENT, TEXT) };
+            self.cv.clip = (bx, bx + filled);
+            self.text.draw(&mut self.cv, fx, ty, &figure, bw, on_fill);
+            self.cv.clip = (bx + filled, bx + bw);
+            self.text.draw(&mut self.cv, fx, ty, &figure, bw, on_track);
+            self.cv.clip = (0, right);
+            // When it last changed: for a folder, its newest content.
+            let (dx, dw) = cols[5];
+            if dw > 0 {
+                let (yr, mo, d, ..) = ff_core::local_civil(tree.newest(id));
+                self.text.draw(&mut self.cv, dx + pad, ty, &format!("{yr:04}-{mo:02}-{d:02}"), dw - pad, dim);
             }
         }
         self.cv.clip = (0, i32::MAX);
         if tree.rows.len() > rows {
             let (track, thumb) = self.scrollbar();
             let pos = ((track - thumb) as i64 * tree.top as i64 / (tree.rows.len() - rows).max(1) as i64) as i32;
-            self.cv.fill(right, list_top, bar, track, PANEL);
-            self.cv.fill(right + 2 * u, list_top + pos, bar - 4 * u, thumb, 0xa6a6a6);
+            let tw = 4 * u;
+            self.cv.round(right + (bar - tw) / 2, list_top + pos + 2 * u, tw, thumb - 4 * u, tw / 2, palette::QUIET);
         }
 
         // The map.

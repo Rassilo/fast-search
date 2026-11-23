@@ -34,6 +34,10 @@ pub struct Tree {
     total: Vec<u64>,
     /// Per entry: how many files it holds (1 for a file).
     files: Vec<u32>,
+    /// Per entry: how many folders it holds, at any depth.
+    folders: Vec<u32>,
+    /// Per entry: the newest modification time in it (its own for a file).
+    newest: Vec<i64>,
     /// The children of entry `i` are `kids[first[i]..first[i + 1]]`,
     /// largest first.
     first: Vec<u32>,
@@ -57,22 +61,31 @@ impl Tree {
         let n = index.len();
         let mut total = vec![0u64; n];
         let mut files = vec![0u32; n];
+        let mut folders = vec![0u32; n];
+        let mut newest: Vec<i64> = (0..n as u32).map(|id| index.mtime(id)).collect();
         let mut first = vec![0u32; n + 2];
         for id in 0..n as u32 {
             if let Some(p) = index.parent(id) {
                 first[p as usize + 2] += 1;
             }
-            if index.is_dir(id) {
-                continue;
+            // A file counts for every folder above it, and so does a
+            // folder (in the folder counts), with its date.
+            let is_dir = index.is_dir(id);
+            let (size, mtime) = (if is_dir { 0 } else { index.size(id) }, index.mtime(id));
+            if !is_dir {
+                (total[id as usize], files[id as usize]) = (size, 1);
             }
-            // A file counts for every folder above it.
-            let size = index.size(id);
-            (total[id as usize], files[id as usize]) = (size, 1);
             let mut up = index.parent(id);
             while let Some(p) = up {
-                total[p as usize] += size;
-                files[p as usize] += 1;
-                up = index.parent(p);
+                let p = p as usize;
+                if is_dir {
+                    folders[p] += 1;
+                } else {
+                    total[p] += size;
+                    files[p] += 1;
+                }
+                newest[p] = newest[p].max(mtime);
+                up = index.parent(p as u32);
             }
         }
         for i in 2..n + 2 {
@@ -97,7 +110,7 @@ impl Tree {
         }
         largest_first(&mut roots);
         let rows = roots.iter().map(|&id| Node { id, depth: 0, open: false }).collect();
-        let mut tree = Tree { total, files, first, kids, roots, rows, sel: 0, top: 0 };
+        let mut tree = Tree { total, files, folders, newest, first, kids, roots, rows, sel: 0, top: 0 };
         if tree.roots.len() == 1 {
             tree.open(0);
         }
@@ -106,6 +119,21 @@ impl Tree {
 
     pub fn total(&self, id: u32) -> u64 {
         self.total[id as usize]
+    }
+
+    /// Folders inside `id`, at any depth.
+    pub fn folders(&self, id: u32) -> u32 {
+        self.folders[id as usize]
+    }
+
+    /// The newest modification time inside `id` (its own for a file).
+    pub fn newest(&self, id: u32) -> i64 {
+        self.newest[id as usize]
+    }
+
+    /// Everything indexed: the sizes of all the roots together.
+    pub fn grand_total(&self) -> u64 {
+        self.roots.iter().map(|&r| self.total[r as usize]).sum()
     }
 
     pub fn files(&self, id: u32) -> u32 {

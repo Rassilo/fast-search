@@ -416,10 +416,10 @@ struct App {
     icons: Icons,
     /// Pixels per layout unit (the rounded desktop scale).
     u: i32,
-    /// Widths of the Name, Size and Modified columns chosen by dragging
-    /// their edges, at a scale of 1 (Path takes the rest); None: automatic.
-    column_widths: Option<[f32; 3]>,
-    /// The header edge being dragged: 1 after Name, 2 after Path, 3 after Size.
+    /// Widths of the Name, Path, Size and Modified columns chosen by dragging
+    /// their edges, at a scale of 1; None: automatic.
+    column_widths: Option<[f32; 4]>,
+    /// The header edge being dragged: 1 after Name ... 4 after Modified.
     column_drag: Option<usize>,
     size_w: i32,
     date_w: i32,
@@ -786,7 +786,7 @@ impl App {
             cv: Canvas::new(),
             column_widths: config.more.get("column_widths").and_then(|v| {
                 let w: Vec<f32> = v.split(',').filter_map(|n| n.trim().parse().ok()).collect();
-                (w.len() == 3 && w.iter().all(|&n| n > 0.0)).then(|| [w[0], w[1], w[2]])
+                (w.len() == 4 && w.iter().all(|&n| n > 0.0)).then(|| [w[0], w[1], w[2], w[3]])
             }),
             column_drag: None,
             size_w: text.width("000,000,000 KB") + 16 * u,
@@ -2318,7 +2318,7 @@ impl App {
         more.insert("language".into(), self.language.to_string());
         more.insert("shortcut".into(), self.shortcut_keys.clone());
         if let Some(w) = self.column_widths {
-            more.insert("column_widths".into(), format!("{:.0},{:.0},{:.0}", w[0], w[1], w[2]));
+            more.insert("column_widths".into(), format!("{:.0},{:.0},{:.0},{:.0}", w[0], w[1], w[2], w[3]));
         }
         let config = Config { scale, own_title_bar: self.custom_title, regex: self.regex, whole_word: self.whole_word, case, more };
         if let Err(e) = config.save() {
@@ -3003,48 +3003,43 @@ impl App {
     }
 
     /// (x, width) in pixels of the Name, Path, Size and Date columns.
+    /// Until the user sizes them, Path takes the room the others leave;
+    /// after that each keeps its width, and what passes the window's
+    /// edge is cut off.
     fn columns(&self) -> [(i32, i32); 4] {
-        let px = |w: f32| (w * self.scale).round() as i32;
-        let (size_w, date_w) = self.column_widths.map_or((self.size_w, self.date_w), |w| (px(w[1]), px(w[2])));
-        let avail = (self.cv.w as i32 - self.bar_w() - size_w - date_w).max(0);
-        let name = match self.column_widths {
-            // Path keeps at least a little room when the window narrows.
-            Some(w) => px(w[0]).min(avail - 40 * self.u).max(40 * self.u),
-            None => (avail * 2 / 5).max(120 * self.u),
+        let widths = match self.column_widths {
+            Some(w) => w.map(|w| (w * self.scale).round() as i32),
+            None => {
+                let avail = (self.cv.w as i32 - self.bar_w() - self.size_w - self.date_w).max(0);
+                let name = (avail * 2 / 5).max(120 * self.u);
+                [name, (avail - name).max(0), self.size_w, self.date_w]
+            }
         };
         let mut x = 0;
-        [name, (avail - name).max(0), size_w, date_w].map(|w| {
+        widths.map(|w| {
             let col = (x, w);
             x += w;
             col
         })
     }
 
-    /// The column edge in the header under (x, y), if any: 1 after Name,
-    /// 2 after Path, 3 after Size.
+    /// The column edge in the header under (x, y), if any: edge `i` is
+    /// the right edge of column `i - 1` (1 after Name ... 4 after Date).
     fn column_edge_at(&self, x: i32, y: i32) -> Option<usize> {
         if self.tree.is_some() || y < self.box_h() || y >= self.list_top() {
             return None;
         }
         let cols = self.columns();
-        (1..4).find(|&i| (x - cols[i].0).abs() <= 6 * self.u)
+        (1..=4).find(|&i| (x - (cols[i - 1].0 + cols[i - 1].1)).abs() <= 6 * self.u)
     }
 
-    /// Moves column edge `edge` to `x`: the columns on each side of it
-    /// grow and shrink, each keeping a minimum width.
+    /// Moves column edge `edge` to `x`: the column on its left takes the
+    /// new width and those on its right move along, keeping theirs.
     fn drag_column(&mut self, edge: usize, x: i32) {
-        let [(_, name), _, (size_x, size), (date_x, date)] = self.columns();
-        let min = 40 * self.u;
-        let (name, size, date) = match edge {
-            1 => (x.clamp(min, (size_x - min).max(min)), size, date),
-            2 => (name, (date_x - x).max(min), date),
-            _ => {
-                let x = x.clamp(size_x + min, (date_x + date - min).max(size_x + min));
-                (name, x - size_x, date_x + date - x)
-            }
-        };
-        let logical = |w: i32| w as f32 / self.scale;
-        self.column_widths = Some([logical(name), logical(size), logical(date)]);
+        let cols = self.columns();
+        let mut widths = cols.map(|(_, w)| w);
+        widths[edge - 1] = (x - cols[edge - 1].0).max(40 * self.u);
+        self.column_widths = Some(widths.map(|w| w as f32 / self.scale));
     }
 
     /// Scrollbar (track height, thumb height) in pixels.
@@ -3141,6 +3136,9 @@ impl App {
             self.cv.fill(tx + caret, ty, u.max(1), self.text.height, TEXT);
             self.cv.clip = (0, i32::MAX);
 
+            // Columns sized wider than the window are cut off before the
+            // scrollbar.
+            self.cv.clip = (0, w - bar);
             // Column headers with the sort direction, quiet, on the list.
             let y = self.box_h();
             self.cv.fill(pad, y + row_h, w - 2 * pad, 1, LINE);
@@ -3198,6 +3196,7 @@ impl App {
                 self.text.draw(&mut self.cv, cols[3].0 + pad, ty, &date, cols[3].1 - pad, dim);
             }
 
+            self.cv.clip = (0, i32::MAX);
             // Scrollbar.
             if self.hits.len() > rows {
                 let (track, thumb) = self.scrollbar();

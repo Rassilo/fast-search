@@ -514,7 +514,8 @@ What differs from Linux:
   Ctrl+Alt+F; set it in *Options → Desktop* by pressing the keys, such as
   Alt+Q) is registered by the running window, so it works while Fast
   search runs, which it does from sign-in; if another program holds the
-  keys, Options says so. Column widths follow dragging the header edges.
+  keys, Options says so. Dragging a column header's right edge sizes that
+  column; those after it move along.
   Closing the window (its X, Alt+F4, or Esc on an empty search) hides it
   to the notification area, index loaded: the shortcut, or starting
   `ff-gui` again, shows it at once. *File → Quit*, Ctrl+Q or the tray
